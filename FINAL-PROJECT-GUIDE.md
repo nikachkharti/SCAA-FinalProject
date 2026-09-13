@@ -547,6 +547,8 @@ aws iam create-user --user-name github-ci-scaa
         "ec2:TerminateInstances",
         "ec2:StopInstances",
         "ec2:StartInstances",
+        "ec2:MonitorInstances",
+        "ec2:UnmonitorInstances",
         "ec2:CreateTags",
         "ec2:DeleteTags",
         "ec2:CreateSecurityGroup",
@@ -3835,9 +3837,48 @@ Check with `aws s3 ls` and compare with the repository variable
 (Settings → Secrets and variables → Actions → Variables).
 
 **`AccessDenied` or `UnauthorizedOperation` during apply**
-The CI IAM user is missing a permission. Read the error — it names the exact
-action, for example `ec2:AllocateAddress`. Add it to `ci-policy.json` and run
-`aws iam put-user-policy` again.
+The CI IAM user is missing a permission. The message always names the exact
+action, for example:
+
+```
+UnauthorizedOperation: You are not authorized to perform this operation.
+User: arn:aws:iam::518902362598:user/github-ci-scaa is not authorized to
+perform: ec2:MonitorInstances ... because no identity-based policy allows
+the ec2:MonitorInstances action.
+```
+
+Add that action to `ci-policy.json`, then update the policy. **The command
+depends on how you created it:**
+
+*Console path (section 4A.6) — a customer managed policy:*
+
+```powershell
+# Edit ci-policy.json first, then publish it as a new default version
+aws iam create-policy-version `
+  --policy-arn arn:aws:iam::<your-account-id>:policy/scaa-final-ci-policy `
+  --policy-document file://ci-policy.json `
+  --set-as-default
+```
+
+(A managed policy keeps at most 5 versions. If you hit that limit, delete an
+old one with `aws iam delete-policy-version --version-id v1`.)
+
+*CLI path (section 4.3) — an inline user policy:*
+
+```powershell
+aws iam put-user-policy `
+  --user-name github-ci-scaa `
+  --policy-name scaa-final-ci-policy `
+  --policy-document file://ci-policy.json
+```
+
+Then simply re-run the failed job in the Actions tab — Terraform picks up where
+it stopped, because the resources it already created are in the state file.
+
+> **`Encoded authorization failure message: B9v7IJs7...`** at the end of the
+> error is a signed blob with the full details. You can read it:
+> `aws sts decode-authorization-message --encoded-message "<the long string>" --query DecodedMessage --output text`
+> You rarely need it — the plain text above it already names the action.
 
 **Variables or secrets are empty in the job (`TF_STATE_BUCKET` is blank)**
 Four usual causes:
