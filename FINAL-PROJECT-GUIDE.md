@@ -2979,6 +2979,8 @@ jobs:
       - name: Wait until the instance is registered in SSM
         run: |
           set -euo pipefail
+          # This only proves the SSM agent is running. The bootstrap script may
+          # still be installing Docker - the deploy step below waits for that.
           echo "===== Waiting for SSM ====="
           READY=0
           for i in $(seq 1 40); do
@@ -3003,20 +3005,35 @@ jobs:
         run: |
           set -euo pipefail
           echo "===== Sending the deploy command ====="
+          # The SSM agent reports "Online" a minute or two BEFORE cloud-init has
+          # finished, so /usr/local/bin/deploy-app.sh may not exist yet. The first
+          # remote command waits for the bootstrap, the second proves the script is
+          # there (a clear error if it is not), the third does the real deployment.
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy $IMAGE_TAG from GitHub Actions run $GITHUB_RUN_ID" \
-            --parameters "commands=[\"/usr/local/bin/deploy-app.sh $IMAGE_TAG\"]" \
+            --parameters "commands=[\"cloud-init status --wait || true\",\"ls -l /usr/local/bin/deploy-app.sh\",\"/usr/local/bin/deploy-app.sh $IMAGE_TAG\"]" \
             --timeout-seconds 600 \
             --query 'Command.CommandId' \
             --output text)
           echo "SSM command id: $COMMAND_ID"
 
-          # The waiter can time out; we read the real status right after.
-          aws ssm wait command-executed \
-            --command-id "$COMMAND_ID" \
-            --instance-id "$INSTANCE_ID" || true
+          # Poll until the command reaches a final state. The built-in
+          # "aws ssm wait command-executed" gives up after about 100 seconds,
+          # which is far too short for the first boot of a new instance.
+          STATUS="Pending"
+          for i in $(seq 1 60); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query 'Status' --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            echo "Attempt $i/60 - remote status: $STATUS"
+            sleep 10
+          done
 
           RESULT=$(aws ssm get-command-invocation \
             --command-id "$COMMAND_ID" \
@@ -3904,6 +3921,44 @@ at start-up: read the `Application logs from the smoke test` step, or add
 `docker ps -a` before the curl loop. (Tutorials written for GitLab use
 `http://docker:8080` because of Docker-in-Docker — that host name does not
 exist here.)
+
+**`/usr/local/bin/deploy-app.sh: No such file or directory` (exit status 127)**
+A race, not a broken instance. The SSM agent reports **Online** about a minute
+or two *before* cloud-init has finished, so the pipeline can send the deploy
+command while the bootstrap script is still being written. Symptoms: the SSM
+command fails within seconds, remote stdout is empty, and a minute later the
+file is there and the container is running (the bootstrap deploys once by
+itself in step 5/5).
+
+The fix is already in the workflow in section 6.3 — the remote command starts
+with `cloud-init status --wait`, so the instance waits for its own bootstrap
+before running the deploy:
+
+```
+--parameters "commands=[\"cloud-init status --wait || true\",\"ls -l /usr/local/bin/deploy-app.sh\",\"/usr/local/bin/deploy-app.sh $IMAGE_TAG\"]"
+```
+
+If you copied an older version of the file, add that first command. Then simply
+re-run the job — nothing in AWS needs to be recreated.
+
+To see what the instance was doing at that moment:
+
+```powershell
+aws ssm send-command --instance-ids "i-xxxxxxxxxxxx" `
+  --document-name "AWS-RunShellScript" `
+  --parameters 'commands=["cloud-init status","ls -l /usr/local/bin/","tail -30 /var/log/user-data.log"]'
+```
+
+**`Waiter CommandExecuted failed ... matched expected path: "Failed"`**
+This line is only the AWS CLI waiter reporting that the remote command ended in
+a failed state — the real reason is printed right below it, under
+`----- remote stderr -----`. Read that, not the waiter message.
+
+> The same waiter has the opposite problem too: it gives up after about 100
+> seconds, so on a slow first boot it can return while the command is still
+> `InProgress`, and the job then fails even though the deployment later
+> succeeds. That is why the workflow in section 6.3 polls
+> `aws ssm get-command-invocation` in a loop instead of trusting the waiter.
 
 **The `deploy` job says "the instance never appeared in SSM"**
 The instance needs 2–4 minutes to install the SSM agent and register.
