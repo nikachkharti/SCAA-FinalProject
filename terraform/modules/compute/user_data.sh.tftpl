@@ -1,0 +1,172 @@
+#!/bin/bash
+# ---------------------------------------------------------------------------
+# EC2 bootstrap script (runs once, as root, on first boot).
+# Rendered by Terraform: ${...} placeholders are replaced before upload.
+# ---------------------------------------------------------------------------
+set -euxo pipefail
+exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+echo "=== [1/5] Updating packages ==="
+dnf update -y
+
+echo "=== [2/5] Installing Docker and the CloudWatch agent ==="
+dnf install -y docker amazon-cloudwatch-agent
+systemctl enable --now docker
+
+# Let ec2-user run docker without sudo (useful if you ever connect manually).
+usermod -aG docker ec2-user || true
+
+echo "=== [3/5] Configuring the CloudWatch agent (metrics + OS logs) ==="
+cat > /opt/aws/amazon-cloudwatch-agent/etc/scaa-agent.json <<'CWAGENT'
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
+  },
+  "metrics": {
+    "namespace": "METRICS_NAMESPACE_PLACEHOLDER",
+    "append_dimensions": {
+      "InstanceId": "$${aws:InstanceId}"
+    },
+    "aggregation_dimensions": [["InstanceId"]],
+    "metrics_collected": {
+      "mem": {
+        "measurement": [
+          {"name": "mem_used_percent", "rename": "MemoryUsedPercent", "unit": "Percent"}
+        ],
+        "metrics_collection_interval": 60
+      },
+      "disk": {
+        "resources": ["/"],
+        "measurement": [
+          {"name": "used_percent", "rename": "DiskUsedPercent", "unit": "Percent"}
+        ],
+        "metrics_collection_interval": 60
+      },
+      "swap": {
+        "measurement": ["swap_used_percent"],
+        "metrics_collection_interval": 60
+      }
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/messages",
+            "log_group_name": "SYSTEM_LOG_GROUP_PLACEHOLDER",
+            "log_stream_name": "{instance_id}/messages",
+            "retention_in_days": -1
+          },
+          {
+            "file_path": "/var/log/user-data.log",
+            "log_group_name": "SYSTEM_LOG_GROUP_PLACEHOLDER",
+            "log_stream_name": "{instance_id}/user-data",
+            "retention_in_days": -1
+          },
+          {
+            "file_path": "/var/log/scaa-deploy.log",
+            "log_group_name": "SYSTEM_LOG_GROUP_PLACEHOLDER",
+            "log_stream_name": "{instance_id}/deploy",
+            "retention_in_days": -1
+          }
+        ]
+      }
+    }
+  }
+}
+CWAGENT
+
+# Replace the placeholders with the values Terraform gave us.
+sed -i "s|METRICS_NAMESPACE_PLACEHOLDER|${metrics_namespace}|g" /opt/aws/amazon-cloudwatch-agent/etc/scaa-agent.json
+sed -i "s|SYSTEM_LOG_GROUP_PLACEHOLDER|${system_log_group}|g" /opt/aws/amazon-cloudwatch-agent/etc/scaa-agent.json
+
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/scaa-agent.json
+
+echo "=== [4/5] Writing the deployment script ==="
+cat > /usr/local/bin/deploy-app.sh <<'DEPLOY'
+#!/bin/bash
+# Pull an image tag from ECR and (re)start the container.
+# Usage: deploy-app.sh <image-tag>
+set -euo pipefail
+exec >> /var/log/scaa-deploy.log 2>&1
+
+TAG="$1"
+REGION="__AWS_REGION__"
+REPO="__ECR_REPOSITORY_URL__"
+NAME="__CONTAINER_NAME__"
+HOST_PORT="__HOST_PORT__"
+CONTAINER_PORT="__CONTAINER_PORT__"
+APP_LOG_GROUP="__APP_LOG_GROUP__"
+REGISTRY="$(echo "$REPO" | cut -d/ -f1)"
+
+echo "----------------------------------------------------------------"
+echo "[deploy] $(date -u +%FT%TZ) starting deploy of tag: $TAG"
+
+echo "[deploy] logging in to ECR"
+aws ecr get-login-password --region "$REGION" \
+  | docker login --username AWS --password-stdin "$REGISTRY"
+
+echo "[deploy] pulling $REPO:$TAG"
+docker pull "$REPO:$TAG"
+
+echo "[deploy] stopping the old container (if any)"
+docker rm -f "$NAME" 2>/dev/null || true
+
+echo "[deploy] starting the new container"
+docker run -d \
+  --name "$NAME" \
+  --restart unless-stopped \
+  -p "$HOST_PORT":"$CONTAINER_PORT" \
+  -e ASPNETCORE_ENVIRONMENT=Production \
+  -e APP_VERSION="$TAG" \
+  --log-driver awslogs \
+  --log-opt awslogs-region="$REGION" \
+  --log-opt awslogs-group="$APP_LOG_GROUP" \
+  --log-opt awslogs-stream="$(hostname)/$TAG" \
+  --memory 768m \
+  --cpus 1.0 \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --security-opt no-new-privileges:true \
+  "$REPO:$TAG"
+
+echo "[deploy] waiting for the health endpoint"
+for i in $(seq 1 30); do
+  if curl -fsS "http://localhost:$HOST_PORT/health" >/dev/null 2>&1; then
+    echo "[deploy] OK - application is healthy after $i attempt(s)"
+    echo "[deploy] cleaning up unused images"
+    docker image prune -af >/dev/null 2>&1 || true
+    echo "[deploy] finished successfully"
+    exit 0
+  fi
+  sleep 2
+done
+
+echo "[deploy] ERROR - application did not become healthy in 60 seconds"
+docker logs --tail 100 "$NAME" || true
+exit 1
+DEPLOY
+
+# Fill in the placeholders in the deploy script.
+sed -i \
+  -e "s|__AWS_REGION__|${aws_region}|g" \
+  -e "s|__ECR_REPOSITORY_URL__|${ecr_repository_url}|g" \
+  -e "s|__CONTAINER_NAME__|${container_name}|g" \
+  -e "s|__HOST_PORT__|${host_port}|g" \
+  -e "s|__CONTAINER_PORT__|${container_port}|g" \
+  -e "s|__APP_LOG_GROUP__|${application_log_group}|g" \
+  /usr/local/bin/deploy-app.sh
+
+chmod 755 /usr/local/bin/deploy-app.sh
+
+echo "=== [5/5] First deploy attempt ==="
+# On the very first apply the image is not in ECR yet, so this is allowed to
+# fail. The pipeline's deploy stage runs the same script again afterwards.
+/usr/local/bin/deploy-app.sh "${image_tag}" || \
+  echo "First deploy skipped - the pipeline will deploy the image."
+
+echo "=== Bootstrap finished ==="

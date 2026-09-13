@@ -12,6 +12,7 @@
 2. [Before you start — accounts and tools](#2-before-you-start)
 3. [Step 1 review — fix your application and Dockerfile](#3-step-1-review)
 4. [Step 2 — prepare AWS (state bucket + CI user)](#4-step-2-prepare-aws)
+   * [4A. Step 2 in full detail — empty AWS account, console walkthrough](#4a-step-2-detailed)
 5. [Step 3 — Terraform infrastructure as code](#5-step-3-terraform)
 6. [Step 4 — GitLab CI/CD pipeline](#6-step-4-gitlab-cicd)
 7. [Step 5 — deployment and monitoring check](#7-step-5-deployment-and-monitoring)
@@ -671,6 +672,522 @@ The last command prints something like:
 > **Why this policy?** It is "least privilege": the CI user can only touch the S3 bucket you created, only IAM roles whose name starts with `scaa-final-`, and only the services this project needs. It cannot delete other people's resources or create new users.
 
 > **Simpler alternative** (if you are short on time and this is a personal sandbox account): attach the AWS managed policy `PowerUserAccess` plus a small inline IAM policy. It works, but you will lose "least privilege" points. The JSON above is better.
+
+
+---
+
+<a name="4a-step-2-detailed"></a>
+
+## 4A. Step 2 in full detail — building the bootstrap from a completely empty AWS account
+
+> **Read this if:** you just opened your AWS account, you see an empty console, and sections 4.1 – 4.3 above felt too short.
+>
+> Sections 4.1 – 4.3 are the **short version** (CLI). This section 4A is the **long version** (console, click by click) of exactly the same work, plus everything an empty account needs *before* those commands can work.
+>
+> **You do not have to do both.** Do the console clicks here, or the CLI commands above — the result is identical. Most beginners do 4A.1 – 4A.6 in the console, then use the CLI for the checks.
+
+### What "prepare AWS" really means
+
+At the end of Step 2 your AWS account must contain exactly **four** things:
+
+| # | Thing | Why | Created in |
+|---|---|---|---|
+| 1 | A **normal IAM user for you** (not root) with an access key | You must never work as root, and `aws configure` needs a key | 4A.3 |
+| 2 | A **budget / billing alert** | So AWS cannot surprise you with a bill | 4A.4 |
+| 3 | An **S3 bucket** for the Terraform state file | Terraform runs on a fresh CI machine every time and must keep its memory somewhere | 4A.5 |
+| 4 | An **IAM user `gitlab-ci-scaa`** with a least-privilege policy and an access key | The pipeline logs in to AWS as this user | 4A.6 |
+
+**That is all.** Everything else in this project — the ECR repository, the EC2 instance, the security group, the instance role, the Elastic IP, the CloudWatch log groups, the alarms and the dashboard — is created by **Terraform** in Step 3. Do **not** click those together by hand. Section 4A.8 lists every "hands off" resource and explains what breaks if you create them anyway.
+
+---
+
+### 4A.1 First look at an empty AWS account
+
+Open https://console.aws.amazon.com and sign in with the e-mail address you used to open the account (that is the **root user**).
+
+Learn these four parts of the screen — you will use them constantly:
+
+```
++---------------------------------------------------------------------------+
+|  aws   [ Q Search for services... ]        [ Frankfurt v ]  [ Your name v ]|
+|         (1) search box                      (2) region       (3) account   |
++---------------------------------------------------------------------------+
+|                                                                           |
+|   (4) the service page you opened (S3, IAM, EC2, CloudWatch ...)          |
+|                                                                           |
++---------------------------------------------------------------------------+
+```
+
+1. **Search box** — the fastest way to open any service. Type `S3`, `IAM`, `EC2`, `CloudWatch`, `Budgets`, press Enter.
+2. **Region selector (top right)** — AWS is split into regions and **each region is a separate world**. A bucket created in Frankfurt is invisible in Ireland. Set it to **Europe (Frankfurt) eu-central-1** and never change it during this project. If a resource "disappears", 90 % of the time you are just looking at the wrong region.
+3. **Account menu** — your account ID, "Security credentials", "Billing and Cost Management".
+4. The page itself.
+
+> **Two things are global, not regional:** **IAM** (users, policies, roles) and **S3 bucket names**. IAM pages show "Global" instead of a region. Everything else in this project (EC2, ECR, CloudWatch, SSM) lives inside eu-central-1.
+
+**Write down your account ID now.** Account menu (top right) → the 12-digit number under your name; click it to copy. You will need it for the ECR URL later (`<account-id>.dkr.ecr.eu-central-1.amazonaws.com`).
+
+**Check which Free Tier plan you are on** (AWS changed this in mid-2025, so a new account looks different from older tutorials):
+**Account menu → Billing and Cost Management → Free tier** (left menu).
+
+* If you see a **credit balance** (for example "$100 free credits, expires in 6 months") you are on the new plan. Your EC2 hours are paid from those credits — fine for this project, which costs roughly $1–4 per month if you follow the destroy rule.
+* If you see a table of **"12 months free"** usage lines, you are on the older plan — also fine.
+* If the console says your account is on a **"Free plan"** (signed up without a card), some launches are blocked. Open **Billing → Account overview** and switch to the paid plan, otherwise `terraform apply` will fail when it tries to start EC2.
+
+---
+
+### 4A.2 Protect the root user (10 minutes, done once)
+
+The root user can do *everything*, including closing the account and spending money. It cannot be limited by any policy. So we lock it and stop using it.
+
+**A. Turn on MFA for root**
+
+1. Account menu (top right) → **Security credentials**.
+2. Find the block **Multi-factor authentication (MFA)** → **Assign MFA device**.
+3. Device name: `root-phone`. Choose **Authenticator app** → **Next**.
+4. Install *Google Authenticator* or *Microsoft Authenticator* on your phone, scan the QR code.
+5. Type **two codes in a row** (wait for the app to change the number between them) → **Add MFA**.
+
+**B. Confirm root has no access keys**
+
+On the same page, the block **Access keys** must be empty. If a key exists, delete it. Root access keys are the most dangerous object in an AWS account — if one leaks, the finder owns the account.
+
+**C. Give your sign-in page a name (optional but nice)**
+
+Account menu → **Account** → **Account Alias** → Create → for example `scaa-nika`.
+Your sign-in URL becomes `https://scaa-nika.signin.aws.amazon.com/console` instead of the 12-digit number.
+
+> **Grading note:** "MFA on root, no root access keys, daily work done by a non-root user" is a standard security checklist item. Take a screenshot of the MFA block — good material for the security section of your report.
+
+---
+
+### 4A.3 Create your own admin IAM user and stop using root
+
+You need a second user — a normal one — for daily work and for `aws configure`.
+
+**Click by click:**
+
+1. Search box → **IAM** → left menu **Users** → button **Create user**.
+2. **User name:** `nika-admin` → tick **Provide user access to the AWS Management Console**.
+3. Choose **I want to create an IAM user** (the console pushes you toward Identity Center; for a one-person student project a plain IAM user is simpler and perfectly acceptable).
+4. **Custom password** → type a strong password. Untick *"Users must create a new password at next sign-in"* if you do not want the extra step → **Next**.
+5. **Set permissions** → **Attach policies directly** → search `AdministratorAccess` → tick it → **Next**.
+6. **Create user** → on the success page click **Download .csv file** and save the sign-in URL + password somewhere safe (**not** in the repository).
+
+**Now switch users:**
+
+1. Sign out of root (Account menu → Sign out).
+2. Open the sign-in URL from the CSV (or `https://<account-id>.signin.aws.amazon.com/console`).
+3. Sign in as `nika-admin`. From here on, **every console click in this guide is done as `nika-admin`.**
+4. Recommended: give this user MFA too (**IAM → Users → nika-admin → Security credentials → Assign MFA device**).
+
+**Create the access key for the CLI** — this is the key section 4.1 asks for:
+
+1. **IAM → Users → nika-admin → Security credentials** tab.
+2. Scroll to **Access keys** → **Create access key**.
+3. Use case: **Command Line Interface (CLI)** → tick the confirmation box → **Next**.
+4. Description tag: `laptop-cli` → **Create access key**.
+5. **Download .csv file.** The secret is shown **once**. If you lose it, delete the key and create a new one — that is normal and free.
+
+Now run `aws configure` from section 4.1 with this key, then `aws sts get-caller-identity`. The output must look like:
+
+```json
+{
+    "UserId": "AIDA....................",
+    "Account": "123456789012",
+    "Arn": "arn:aws:iam::123456789012:user/nika-admin"
+}
+```
+
+If the `Arn` ends with `:root`, you configured a root key — delete that key and redo this section.
+
+> **Why two users?** `nika-admin` is *you*: laptop, password, MFA. `gitlab-ci-scaa` (section 4A.6) is *the robot*: no password, no console, only the permissions this project needs. Separating humans from machines is core IAM practice and it is worth points.
+
+---
+
+### 4A.4 Put a fence around the money (do this before creating anything)
+
+Five minutes now can save you a real bill later.
+
+**A. Let IAM users see billing** — this is a root-only setting, so sign in as root once, then sign back out:
+
+Account menu → **Account** → scroll to **IAM user and role access to Billing information** → **Edit** → tick **Activate IAM Access** → **Update**.
+
+**B. Create a budget with an e-mail alert:**
+
+1. Search box → **Billing and Cost Management** → left menu **Budgets** → **Create budget**.
+2. Choose **Use a template (simplified)** → **Monthly cost budget**.
+3. **Budget amount:** `5` (US dollars). This project should normally stay under that.
+4. **E-mail recipients:** your e-mail → **Create budget**.
+
+AWS now e-mails you when actual or forecast spend passes the thresholds of that $5 budget.
+
+**C. Turn on Free Tier usage alerts:**
+
+**Billing and Cost Management → Billing preferences → Alert preferences → Edit** → tick the Free Tier / usage alert options → add your e-mail → **Update**.
+
+**D. Know what actually costs money here:**
+
+| Resource | Cost reality |
+|---|---|
+| EC2 `t3.micro` running 24/7 | The main cost — a few dollars a month, or covered by Free Tier hours / credits depending on your plan. |
+| **Public IPv4 address** (the Elastic IP on the instance) | Since 2024 AWS charges about **$0.005 per hour (~$3.60/month)** for *every* public IPv4 address, even an attached one. Normal and expected for this project. |
+| Elastic IP **not attached** to a running instance | Also charged. This is why `terraform destroy` matters — a forgotten EIP is the classic "why is my bill $4" story. |
+| ECR storage | ~$0.10 per GB-month. Your image is ~110 MB and the lifecycle policy in Step 3 deletes old ones. Pennies. |
+| CloudWatch logs | 7-day retention (Step 3 sets it). Pennies. |
+| S3 state bucket | A few kilobytes. Effectively free. |
+
+**The rule from section 1 still applies: run the `destroy` job when you stop working.** A budget alert is a safety net, not a substitute.
+
+---
+
+### 4A.5 Create the Terraform state bucket in the console (same result as 4.2)
+
+**What this bucket is for, in one picture:**
+
+```
+   pipeline run #1                 S3 bucket (your account)
+   terraform apply  ──writes──▶   scaa-final-tfstate-nika-7431/
+                                     terraform.tfstate      <- "what exists in AWS"
+                                     terraform.tfstate.tflock <- "someone is applying now"
+   pipeline run #2
+   terraform apply  ──reads───▶   the same file, so it knows it must only CHANGE
+                                  the instance, not create a second one
+```
+
+Without this bucket, every pipeline run would start with amnesia and build a **new** copy of everything.
+
+**Click by click:**
+
+1. Check the region selector says **Europe (Frankfurt) eu-central-1**.
+2. Search box → **S3** → **Create bucket**.
+3. **Bucket type:** General purpose.
+4. **Bucket name:** `scaa-final-tfstate-nika-7431`
+   * must be **globally unique across every AWS customer on earth** — add your name and random digits;
+   * lowercase letters, digits and dashes only; 3–63 characters; no underscores, no capitals.
+   * If the console says *"Bucket with the same name already exists"*, change the digits and try again.
+5. **Region:** Europe (Frankfurt) eu-central-1 — it must match `aws_region` in `variables.tf`.
+6. **Object Ownership:** leave **ACLs disabled (recommended)**.
+7. **Block Public Access settings:** leave **Block all public access** ticked. ✅ Your state file can contain sensitive values; it must never be public.
+8. **Bucket Versioning:** select **Enable**. This keeps every old copy of the state file, so if a run corrupts it you can roll back.
+9. **Default encryption:** **Server-side encryption with Amazon S3 managed keys (SSE-S3)**. Leave **Bucket Key** enabled.
+   *Do not pick SSE-KMS* — it works, but then the CI user also needs KMS permissions that the policy in 4.3 does not grant.
+10. **Create bucket**.
+
+**Verify in the console:** open the bucket → **Properties** tab. You must see:
+
+| Property | Required value |
+|---|---|
+| Bucket Versioning | Enabled |
+| Default encryption | Enabled, SSE-S3 (AES-256) |
+| Region | eu-central-1 |
+| (Permissions tab) Block public access | On, all four options |
+
+**Verify from PowerShell** (this is what the graders' checklist really wants):
+
+```powershell
+$env:TF_STATE_BUCKET = "scaa-final-tfstate-nika-7431"
+
+aws s3api get-bucket-versioning --bucket $env:TF_STATE_BUCKET
+aws s3api get-bucket-encryption --bucket $env:TF_STATE_BUCKET
+aws s3api get-public-access-block --bucket $env:TF_STATE_BUCKET
+```
+
+Expected, in order: `"Status": "Enabled"` — `"SSEAlgorithm": "AES256"` — four times `true`.
+
+> **The bucket stays empty for now.** The first `terraform init` in the pipeline creates `terraform.tfstate` inside it. If you look in the bucket after Step 4 and see that file, the remote backend works.
+
+> **Write the bucket name down.** It goes into the GitLab variable `TF_STATE_BUCKET` (section 6.2) and into the `ci-policy.json` you are about to create.
+
+---
+
+### 4A.6 Create the CI policy and the `gitlab-ci-scaa` user in the console (same result as 4.3)
+
+Section 4.3 does this with two CLI commands and an **inline** policy. The console version below creates the same permissions as a **customer managed policy** and attaches it. Either is correct — a managed policy is slightly nicer because you can see it, edit it and reuse it in the IAM console.
+
+**Do only one of the two.** If you already ran the commands in 4.3, skip to 4A.7.
+
+**Step A — create the policy**
+
+1. Search box → **IAM** → left menu **Policies** → **Create policy**.
+2. Switch from *Visual* to the **JSON** tab.
+3. Delete what is there and paste the **whole JSON document from section 4.3** above.
+4. **Replace `REPLACE_WITH_YOUR_BUCKET` with your real bucket name — in both places** (the plain ARN and the one ending in `/*`). They are different: the first means "the bucket itself" (needed for `ListBucket`), the second means "the objects inside it" (needed for `GetObject`/`PutObject`).
+5. **Next** → **Policy name:** `scaa-final-ci-policy` → Description: `Least-privilege policy for the GitLab CI pipeline of the SCAA final project` → **Create policy**.
+
+If the JSON editor shows a red error, it is almost always a missing comma or a broken quote from copy-paste. The editor points at the line.
+
+**Step B — create the user**
+
+1. **IAM → Users → Create user**.
+2. **User name:** `gitlab-ci-scaa`.
+3. **Do NOT tick** "Provide user access to the AWS Management Console" — a robot does not need a login page. → **Next**.
+4. **Permissions options:** **Attach policies directly** → in the filter type `scaa-final-ci-policy` → tick it.
+   (Make sure nothing else is ticked — no `AdministratorAccess` here.) → **Next**.
+5. Review, then **Create user**.
+
+**Step C — create its access key**
+
+1. Open the user **gitlab-ci-scaa** → **Security credentials** tab → **Access keys** → **Create access key**.
+2. Use case: choose **Third-party service** (GitLab is a third-party CI) or **Command Line Interface (CLI)** — both produce an identical key; the choice only changes the warning text.
+3. Tick the confirmation box → **Next** → Description tag: `gitlab-ci` → **Create access key**.
+4. **Download .csv file** and keep it outside the repository. The secret is shown once.
+
+**Step D — where these keys go**
+
+| Value | Goes to |
+|---|---|
+| `AccessKeyId` | GitLab → Settings → CI/CD → Variables → `AWS_ACCESS_KEY_ID` (masked, protected) |
+| `SecretAccessKey` | GitLab → `AWS_SECRET_ACCESS_KEY` (masked, protected) |
+| `eu-central-1` | GitLab → `AWS_DEFAULT_REGION` |
+| your bucket name | GitLab → `TF_STATE_BUCKET` |
+
+Section 6.2 shows the exact GitLab screen. **These four values never appear in a file inside the repository.**
+
+**Step E — test the robot key without breaking your own login**
+
+Never overwrite your `nika-admin` profile with the CI key. Use a **named profile** instead:
+
+```powershell
+# Creates a second profile called "ci" - your default profile stays untouched
+aws configure --profile ci
+# paste the gitlab-ci-scaa key id, secret, region eu-central-1, output json
+
+# Who am I with that key?
+aws sts get-caller-identity --profile ci
+
+# Can it see the state bucket? (should list nothing, but must NOT say AccessDenied)
+aws s3 ls s3://scaa-final-tfstate-nika-7431 --profile ci
+
+# It must NOT be able to create users - this SHOULD fail with AccessDenied.
+# That failure is proof that least privilege works.
+aws iam create-user --user-name should-not-work --profile ci
+```
+
+Expected results:
+
+```
+Arn ends with :user/gitlab-ci-scaa       <- right identity
+s3 ls prints nothing                     <- bucket reachable, still empty
+create-user -> AccessDenied              <- least privilege proven
+```
+
+Take a screenshot of that `AccessDenied` — it is the cleanest possible evidence for the "least privilege" point in your report.
+
+> **Common mistake:** creating the access key **before** attaching the policy, then testing immediately. New IAM permissions can take a few seconds to spread. If something says `AccessDenied` right after you attach a policy, wait 10 seconds and try again before you start debugging.
+
+---
+
+### 4A.7 Things that must already exist in an empty account — check, do not create
+
+These are things AWS gives you for free with the account. Terraform expects them. Check them once now; fixing a missing one later, in the middle of a failing pipeline, is much less pleasant.
+
+**A. The default VPC and its subnets**
+
+`terraform/main.tf` (section 5.11) looks up the **default VPC** instead of building a network. Every new account normally has one in every region — but it can be missing if someone deleted it.
+
+```powershell
+aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[].VpcId" --output text
+aws ec2 describe-subnets --filters "Name=default-for-az,Values=true" --query "Subnets[].{AZ:AvailabilityZone,Subnet:SubnetId}" --output table
+```
+
+You should get one VPC id (`vpc-0abc...`) and **two or more** subnets in different availability zones.
+
+If the first command prints nothing, create the default VPC back:
+
+```powershell
+aws ec2 create-default-vpc
+```
+
+Console equivalent: **VPC → Your VPCs → Actions → Create default VPC**.
+
+**B. EC2 capacity limits (service quotas)**
+
+Brand-new accounts sometimes have a very small vCPU limit, and `terraform apply` then dies with `VcpuLimitExceeded`.
+
+Search box → **Service Quotas** → **AWS services** → **Amazon Elastic Compute Cloud (Amazon EC2)** → find
+**"Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances"**.
+The applied value must be **at least 2** (a `t3.micro` uses 2 vCPUs). Most accounts show 5 or more. If yours shows 0, click **Request increase at account level** and ask for 8 — approval is usually automatic but can take a few hours, so check this *before* you need it.
+
+**C. Your account is fully activated**
+
+Right after sign-up AWS sometimes keeps an account in verification for a few hours. Symptom: launching EC2 fails with a "pending verification" or "Blocked" message. Fix: wait, and check your e-mail for a message from AWS.
+
+**D. No EC2 key pair is needed — on purpose**
+
+You will not create one. There is no SSH into this instance: port 22 stays closed and the pipeline runs commands through **SSM Session Manager** (see section 1 and 5.7). If you catch yourself creating a `.pem` file, stop — you took a wrong turn.
+
+**E. SSM requires nothing from you in advance**
+
+The SSM Agent is pre-installed on Amazon Linux 2023, and the instance role Terraform creates (`AmazonSSMManagedInstanceCore`) gives it permission to register. There is no service to "switch on" in the console.
+
+---
+
+### 4A.8 What you must **not** create by hand
+
+This is the part beginners get wrong. An empty console feels like something is missing, so people start clicking "Launch instance" and "Create repository". **Don't.** Terraform owns these resources, and it only knows about things it created itself.
+
+| Resource | Name it will get | Created by |
+|---|---|---|
+| ECR repository | `scaa-final-dev` | Terraform, section 5.5 |
+| Security group | `scaa-final-dev-sg` (port 80 in, 22 closed) | Terraform, section 5.6 |
+| IAM role + instance profile for EC2 | `scaa-final-dev-...` | Terraform, section 5.7 |
+| CloudWatch log groups | `/scaa-final-dev/application`, `/scaa-final-dev/system` | Terraform, section 5.8 |
+| CloudWatch alarms + dashboard | `scaa-final-dev-...` | Terraform, sections 5.8 / 5.11 |
+| EC2 instance | `scaa-final-dev-web` | Terraform, section 5.9 |
+| Elastic IP | attached to that instance | Terraform, section 5.9 |
+| The Docker image inside ECR | tagged with the commit SHA | the GitLab pipeline, section 6.3 |
+
+**What happens if you create one anyway?** Terraform does not adopt existing resources. You get an error like:
+
+```
+Error: creating ECR Repository (scaa-final-dev): RepositoryAlreadyExistsException
+Error: creating IAM Role (scaa-final-dev-ec2-role): EntityAlreadyExists
+```
+
+The fix is to delete the hand-made resource in the console and re-run the pipeline (or `terraform import` it, which is an advanced topic you do not need here).
+
+> **The one legitimate exception** is the bootstrap itself: the state bucket and the CI user are created by hand *because* Terraform cannot create the place where it stores its own memory. That is why they are not in the Terraform code, and saying this sentence in your report shows you understand the chicken-and-egg problem.
+
+---
+
+### 4A.9 One script that verifies the whole bootstrap
+
+Paste this into PowerShell after you finish 4A.5 and 4A.6. It checks everything Step 2 was supposed to produce and prints a pass/fail line for each item.
+
+```powershell
+$ErrorActionPreference = "Continue"
+$bucket = "scaa-final-tfstate-nika-7431"   # <- your bucket name
+$region = "eu-central-1"
+
+function Check($label, $ok) {
+  if ($ok) { Write-Host ("PASS  " + $label) -ForegroundColor Green }
+  else     { Write-Host ("FAIL  " + $label) -ForegroundColor Red }
+}
+
+# 1. Am I logged in, and not as root?
+$me = aws sts get-caller-identity --output json | ConvertFrom-Json
+Check "CLI logged in as $($me.Arn)" ($me.Arn -notmatch ":root$")
+Write-Host "      account id: $($me.Account)   <- write this down"
+
+# 2. Bucket exists in the right region
+$loc = aws s3api get-bucket-location --bucket $bucket --output json | ConvertFrom-Json
+Check "state bucket exists in $region" ($loc.LocationConstraint -eq $region)
+
+# 3. Versioning on
+$ver = aws s3api get-bucket-versioning --bucket $bucket --output json | ConvertFrom-Json
+Check "bucket versioning enabled" ($ver.Status -eq "Enabled")
+
+# 4. Encryption on
+$enc = aws s3api get-bucket-encryption --bucket $bucket --output json | ConvertFrom-Json
+Check "bucket encrypted (AES256)" ($enc.ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm -eq "AES256")
+
+# 5. Public access blocked
+$pab = aws s3api get-public-access-block --bucket $bucket --output json | ConvertFrom-Json
+Check "public access fully blocked" ($pab.PublicAccessBlockConfiguration.BlockPublicAcls -and $pab.PublicAccessBlockConfiguration.RestrictPublicBuckets)
+
+# 6. CI user exists
+$u = aws iam get-user --user-name gitlab-ci-scaa --output json 2>$null | ConvertFrom-Json
+Check "IAM user gitlab-ci-scaa exists" ($null -ne $u)
+
+# 7. CI user has a policy (inline from 4.3 OR managed from 4A.6)
+$inline  = (aws iam list-user-policies --user-name gitlab-ci-scaa --output json 2>$null | ConvertFrom-Json).PolicyNames
+$managed = (aws iam list-attached-user-policies --user-name gitlab-ci-scaa --output json 2>$null | ConvertFrom-Json).AttachedPolicies
+Check "CI user has a permissions policy" (($inline.Count + $managed.Count) -gt 0)
+
+# 8. CI user has exactly one active access key
+$keys = (aws iam list-access-keys --user-name gitlab-ci-scaa --output json 2>$null | ConvertFrom-Json).AccessKeyMetadata
+Check "CI user has 1 access key" ($keys.Count -eq 1)
+
+# 9. Default VPC + at least 2 default subnets
+$vpc = aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[].VpcId" --output text
+Check "default VPC exists ($vpc)" (-not [string]::IsNullOrWhiteSpace($vpc))
+$subnets = (aws ec2 describe-subnets --filters "Name=default-for-az,Values=true" --query "Subnets[].SubnetId" --output text) -split "\s+" | Where-Object { $_ }
+Check "default subnets found ($($subnets.Count))" ($subnets.Count -ge 1)
+
+# 10. Nothing from Terraform exists yet - the account should still be clean
+$ecr = aws ecr describe-repositories --repository-names scaa-final-dev --output json 2>$null
+Check "ECR repo NOT created by hand" ($null -eq $ecr -or $ecr -eq "")
+```
+
+All ten lines green means Step 2 is finished and you can start Step 3.
+
+---
+
+### 4A.10 Your bootstrap notebook — the five values you must keep
+
+Write these down in a note on your laptop (never in the repository). Every later step asks for one of them.
+
+| Value | Example | Where you need it later |
+|---|---|---|
+| AWS account ID | `123456789012` | the ECR image URL, reading error messages |
+| Region | `eu-central-1` | GitLab variable `AWS_DEFAULT_REGION`, `variables.tf` |
+| State bucket name | `scaa-final-tfstate-nika-7431` | GitLab variable `TF_STATE_BUCKET`, `ci-policy.json` |
+| CI access key ID | `AKIA...` | GitLab variable `AWS_ACCESS_KEY_ID` |
+| CI secret access key | `wJal...` | GitLab variable `AWS_SECRET_ACCESS_KEY` |
+
+**If you lose the secret:** IAM → Users → `gitlab-ci-scaa` → Security credentials → deactivate and delete the old key → **Create access key** → put the new pair into GitLab. Nothing else breaks; keys are disposable.
+
+**If a key ever leaks** (pushed to Git, pasted in a chat): delete it *first*, then worry. IAM → the user → Security credentials → Actions → **Delete**. A deleted key is dead immediately.
+
+---
+
+### 4A.11 Errors you are likely to hit during Step 2, and the fix
+
+| Message | What it means | Fix |
+|---|---|---|
+| `BucketAlreadyExists` | Someone else on earth owns that bucket name | Change the random digits in the name |
+| `BucketAlreadyOwnedByYou` | You already created it | Nothing to do — continue |
+| `IllegalLocationConstraintException` | The region in the command and the region of the bucket disagree | Use the same region everywhere; note that for `us-east-1` you must **omit** `--create-bucket-configuration` |
+| `InvalidClientTokenId` / `SignatureDoesNotMatch` | Wrong or half-pasted key, or a stray space | Re-run `aws configure`; paste the key with no spaces or quotes |
+| `AccessDenied` right after attaching a policy | IAM changes take a few seconds to propagate | Wait 10 seconds, try again |
+| `AccessDenied` on `iam:PutUserPolicy` | You are signed in as a user without IAM rights | Use `nika-admin` (AdministratorAccess), not a limited user |
+| `Error parsing parameter '--policy-document'` | PowerShell mangled the JSON, or Notepad saved the file as UTF-8 **with BOM** | Save `ci-policy.json` from VS Code as "UTF-8" (not "UTF-8 with BOM"), or run `Set-Content -Path ci-policy.json -Value (Get-Content ci-policy.json -Raw) -Encoding ascii` |
+| `The config profile (ci) could not be found` | You used `--profile ci` before creating it | Run `aws configure --profile ci` first |
+| `Could not connect to the endpoint URL` | The region string has a typo (`eu-central1`, `eu-central-l`) | Fix the region — it is `eu-central-1` |
+| `VcpuLimitExceeded` (later, in `terraform apply`) | New-account EC2 quota is too small | Service Quotas → EC2 → request an increase (see 4A.7 B) |
+| `UnauthorizedOperation` in the pipeline on some `ec2:*` call | The CI policy is missing an action | Add that exact action name from the error message to `ci-policy.json` and update the policy |
+| Console shows "0 buckets" / "no instances" | You are in the wrong region | Switch the region selector back to Frankfurt |
+
+> **How to read an AWS permission error.** A message like
+> `User: arn:aws:iam::123456789012:user/gitlab-ci-scaa is not authorized to perform: ec2:DescribeAddresses`
+> tells you three things: **who** (the CI user), **what** (`ec2:DescribeAddresses`) and therefore **the fix** (add `ec2:DescribeAddresses` to the policy). You never have to guess — the missing action is printed literally.
+
+---
+
+### 4A.12 Screenshots worth taking now (for the report)
+
+While the account is small and clean, these are quick to capture and they cover several grading points:
+
+1. **IAM → Users** list showing `nika-admin` and `gitlab-ci-scaa` — proves separation of human and machine identities.
+2. **Root Security credentials** page showing MFA assigned and no access keys.
+3. **IAM → Policies → scaa-final-ci-policy** (JSON tab) — proves least privilege.
+4. The `AccessDenied` output of `aws iam create-user --profile ci` from 4A.6 Step E — proves the limits actually work.
+5. **S3 → your bucket → Properties** showing versioning + encryption on, and **Permissions** showing public access blocked — proves secure state storage.
+6. **Budgets** page showing the $5 budget — proves cost awareness.
+
+Section 12 lists the screenshots for the later steps.
+
+---
+
+### 4A.13 What the account looks like when Step 2 is done
+
+```
+AWS account 123456789012
+├── IAM (global)
+│   ├── user nika-admin        (AdministratorAccess, console + MFA + CLI key)  <- you
+│   ├── user gitlab-ci-scaa    (scaa-final-ci-policy, one access key, no console) <- the pipeline
+│   └── policy scaa-final-ci-policy
+├── S3 (global names, stored in eu-central-1)
+│   └── scaa-final-tfstate-nika-7431   (empty, versioned, encrypted, private)
+├── Billing
+│   └── budget "Monthly cost budget" $5 -> your e-mail
+└── eu-central-1
+    ├── default VPC + subnets   (came with the account)
+    └── nothing else — EC2, ECR and CloudWatch are still empty on purpose
+```
+
+If your account looks like this, Step 2 is complete. **Go to section 5 (Step 3) and start writing the Terraform code.** The next time you touch the AWS console will be in Step 5, to look at the running instance, the logs, the metrics and the dashboard that Terraform and the pipeline created for you.
 
 ---
 
