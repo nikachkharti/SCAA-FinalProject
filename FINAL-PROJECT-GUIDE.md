@@ -1,6 +1,6 @@
 # SCAA Final Project — Complete Step-by-Step Guide
 
-**For:** a beginner who already built the app (Step 1) and now needs Docker + GitLab CI/CD + Terraform + AWS + CloudWatch.
+**For:** a beginner who already built the app (Step 1) and now needs Docker + GitHub Actions CI/CD + Terraform + AWS + CloudWatch.
 **Your stack:** ASP.NET Core 10 MVC (`SCAA-Final/SCAA-Final-Web`).
 **Language level:** simple English. Every command is written out fully.
 
@@ -14,7 +14,7 @@
 4. [Step 2 — prepare AWS (state bucket + CI user)](#4-step-2-prepare-aws)
    * [4A. Step 2 in full detail — empty AWS account, console walkthrough](#4a-step-2-detailed)
 5. [Step 3 — Terraform infrastructure as code](#5-step-3-terraform)
-6. [Step 4 — GitLab CI/CD pipeline](#6-step-4-gitlab-cicd)
+6. [Step 4 — GitHub Actions CI/CD pipeline](#6-step-4-github-actions)
 7. [Step 5 — deployment and monitoring check](#7-step-5-deployment-and-monitoring)
 8. [Step 6 — destroy the infrastructure](#8-step-6-destroy)
 9. [Step 7 — README.md for the graders](#9-step-7-readme)
@@ -31,13 +31,13 @@
 Read this part slowly. If you understand the picture, the rest is only typing.
 
 ```
-   You push code to GitLab
+   You push code to GitHub
             |
             v
   +---------------------------+
-  | GitLab CI/CD pipeline     |
+  | GitHub Actions pipeline   |
   +---------------------------+
-  | 1. build_test             |  Build the Docker image, start it, call /health.
+  | 1. build_and_test         |  Build the Docker image, start it, call /health.
   |                           |  If /health is not 200 -> pipeline STOPS.
   +---------------------------+
   | 2. terraform_apply        |  Terraform creates AWS resources:
@@ -47,10 +47,10 @@ Read this part slowly. If you understand the picture, the rest is only typing.
   |                           |    EC2 instance (the server)
   |                           |    CloudWatch log groups + alarm + dashboard
   +---------------------------+
-  | 3. deploy                 |  Push image to ECR, then tell EC2 (via SSM)
+  | 3. deploy_application     |  Push image to ECR, then tell EC2 (via SSM)
   |                           |  to pull the image and run the container.
   +---------------------------+
-  | 4. destroy (manual)       |  Terraform deletes everything, so you pay 0.
+  | 4. destroy (own workflow) |  Terraform deletes everything, so you pay 0.
   +---------------------------+
             |
             v
@@ -75,12 +75,12 @@ Read this part slowly. If you understand the picture, the rest is only typing.
 | **Terraform state** | A JSON file that remembers what Terraform already created. It must be shared, so we keep it in S3. |
 | **CloudWatch** | AWS monitoring: logs, metrics, alarms, dashboards. |
 | **SSM (Systems Manager)** | AWS feature that runs a command on an EC2 server **without SSH**. Safer — no keys to manage. |
-| **GitLab CI/CD** | A robot that runs commands for you every time you push code. Configured in `.gitlab-ci.yml`. |
-| **Pipeline / stage / job** | Pipeline = the whole run. Stage = a group of steps. Job = one script. |
+| **GitHub Actions** | A robot that runs commands for you every time you push code. Configured in YAML files under `.github/workflows/`. |
+| **Workflow / job / step** | Workflow = the whole run (one YAML file). Job = one machine doing one part of the work. Step = one command inside a job. GitLab calls these pipeline / stage / job — see the translation table in section 6.6. |
 
 ### Why SSM and not SSH?
 
-With SSH you must open port 22, create a key pair, store the private key inside GitLab, and hope nobody steals it.
+With SSH you must open port 22, create a key pair, store the private key inside GitHub, and hope nobody steals it.
 With SSM you open **no extra port** and store **no key**. It is simpler *and* it gives you points for "restricted Security Groups" and "least privilege IAM".
 
 ### Money warning
@@ -97,10 +97,11 @@ Rule: **always run the `destroy` job when you finish working.** Set a phone remi
 ### 2.1 Accounts you need
 
 1. **AWS account** with a card attached (Free Tier is fine) — https://aws.amazon.com
-2. **GitLab account** (free) — https://gitlab.com
+2. **GitHub account** (free) — https://github.com
 
-> Your repository is currently on **GitHub** (`https://github.com/nikachkharti/SCAA-FinalProject.git`).
-> The task requires **GitLab CI**, so the code must also live on GitLab. Section 6.1 shows how to move it.
+> Your repository is already on **GitHub** (`https://github.com/nikachkharti/SCAA-FinalProject.git`), so there is nothing to move. The whole pipeline in section 6 is written for **GitHub Actions**.
+>
+> **One thing to check with your teacher:** if the task text names **GitLab CI** specifically, ask whether GitHub Actions is accepted. Every graded idea — four stages, secure credential storage, fail fast, manual destroy — exists in both tools, and section 6.6 translates the GitLab words into GitHub words one by one. But only your teacher can say whether the tool itself is part of the grade.
 
 ### 2.2 Tools on your Windows machine
 
@@ -473,16 +474,16 @@ Check it exists:
 aws s3 ls | Select-String scaa-final-tfstate
 ```
 
-> **Remember your bucket name.** You will put it into a GitLab variable called `TF_STATE_BUCKET`.
+> **Remember your bucket name.** You will put it into a GitHub Actions variable called `TF_STATE_BUCKET`.
 
-### 4.3 Create the IAM user for GitLab CI
+### 4.3 Create the IAM user for GitHub Actions
 
 The pipeline needs its own user with its own keys. Never use your personal root keys.
 
 **Step A — create the user:**
 
 ```powershell
-aws iam create-user --user-name gitlab-ci-scaa
+aws iam create-user --user-name github-ci-scaa
 ```
 
 **Step B — create a policy file.** Create a file on your Desktop called `ci-policy.json`:
@@ -647,11 +648,11 @@ aws iam create-user --user-name gitlab-ci-scaa
 cd C:\Users\User\Desktop
 
 aws iam put-user-policy `
-  --user-name gitlab-ci-scaa `
+  --user-name github-ci-scaa `
   --policy-name scaa-final-ci-policy `
   --policy-document file://ci-policy.json
 
-aws iam create-access-key --user-name gitlab-ci-scaa
+aws iam create-access-key --user-name github-ci-scaa
 ```
 
 The last command prints something like:
@@ -667,7 +668,7 @@ The last command prints something like:
 ```
 
 **Copy both values now.** AWS shows the secret only once.
-**Do not put them in any file inside the repository.** They go into GitLab variables only (section 6.2).
+**Do not put them in any file inside the repository.** They go into GitHub secrets only (section 6.2).
 
 > **Why this policy?** It is "least privilege": the CI user can only touch the S3 bucket you created, only IAM roles whose name starts with `scaa-final-`, and only the services this project needs. It cannot delete other people's resources or create new users.
 
@@ -695,7 +696,7 @@ At the end of Step 2 your AWS account must contain exactly **four** things:
 | 1 | A **normal IAM user for you** (not root) with an access key | You must never work as root, and `aws configure` needs a key | 4A.3 |
 | 2 | A **budget / billing alert** | So AWS cannot surprise you with a bill | 4A.4 |
 | 3 | An **S3 bucket** for the Terraform state file | Terraform runs on a fresh CI machine every time and must keep its memory somewhere | 4A.5 |
-| 4 | An **IAM user `gitlab-ci-scaa`** with a least-privilege policy and an access key | The pipeline logs in to AWS as this user | 4A.6 |
+| 4 | An **IAM user `github-ci-scaa`** with a least-privilege policy and an access key | The pipeline logs in to AWS as this user | 4A.6 |
 
 **That is all.** Everything else in this project — the ECR repository, the EC2 instance, the security group, the instance role, the Elastic IP, the CloudWatch log groups, the alarms and the dashboard — is created by **Terraform** in Step 3. Do **not** click those together by hand. Section 4A.8 lists every "hands off" resource and explains what breaks if you create them anyway.
 
@@ -801,7 +802,7 @@ Now run `aws configure` from section 4.1 with this key, then `aws sts get-caller
 
 If the `Arn` ends with `:root`, you configured a root key — delete that key and redo this section.
 
-> **Why two users?** `nika-admin` is *you*: laptop, password, MFA. `gitlab-ci-scaa` (section 4A.6) is *the robot*: no password, no console, only the permissions this project needs. Separating humans from machines is core IAM practice and it is worth points.
+> **Why two users?** `nika-admin` is *you*: laptop, password, MFA. `github-ci-scaa` (section 4A.6) is *the robot*: no password, no console, only the permissions this project needs. Separating humans from machines is core IAM practice and it is worth points.
 
 ---
 
@@ -897,11 +898,11 @@ Expected, in order: `"Status": "Enabled"` — `"SSEAlgorithm": "AES256"` — fou
 
 > **The bucket stays empty for now.** The first `terraform init` in the pipeline creates `terraform.tfstate` inside it. If you look in the bucket after Step 4 and see that file, the remote backend works.
 
-> **Write the bucket name down.** It goes into the GitLab variable `TF_STATE_BUCKET` (section 6.2) and into the `ci-policy.json` you are about to create.
+> **Write the bucket name down.** It goes into the GitHub Actions variable `TF_STATE_BUCKET` (section 6.2) and into the `ci-policy.json` you are about to create.
 
 ---
 
-### 4A.6 Create the CI policy and the `gitlab-ci-scaa` user in the console (same result as 4.3)
+### 4A.6 Create the CI policy and the `github-ci-scaa` user in the console (same result as 4.3)
 
 Section 4.3 does this with two CLI commands and an **inline** policy. The console version below creates the same permissions as a **customer managed policy** and attaches it. Either is correct — a managed policy is slightly nicer because you can see it, edit it and reuse it in the IAM console.
 
@@ -913,14 +914,14 @@ Section 4.3 does this with two CLI commands and an **inline** policy. The consol
 2. Switch from *Visual* to the **JSON** tab.
 3. Delete what is there and paste the **whole JSON document from section 4.3** above.
 4. **Replace `REPLACE_WITH_YOUR_BUCKET` with your real bucket name — in both places** (the plain ARN and the one ending in `/*`). They are different: the first means "the bucket itself" (needed for `ListBucket`), the second means "the objects inside it" (needed for `GetObject`/`PutObject`).
-5. **Next** → **Policy name:** `scaa-final-ci-policy` → Description: `Least-privilege policy for the GitLab CI pipeline of the SCAA final project` → **Create policy**.
+5. **Next** → **Policy name:** `scaa-final-ci-policy` → Description: `Least-privilege policy for the GitHub Actions pipeline of the SCAA final project` → **Create policy**.
 
 If the JSON editor shows a red error, it is almost always a missing comma or a broken quote from copy-paste. The editor points at the line.
 
 **Step B — create the user**
 
 1. **IAM → Users → Create user**.
-2. **User name:** `gitlab-ci-scaa`.
+2. **User name:** `github-ci-scaa`.
 3. **Do NOT tick** "Provide user access to the AWS Management Console" — a robot does not need a login page. → **Next**.
 4. **Permissions options:** **Attach policies directly** → in the filter type `scaa-final-ci-policy` → tick it.
    (Make sure nothing else is ticked — no `AdministratorAccess` here.) → **Next**.
@@ -928,21 +929,21 @@ If the JSON editor shows a red error, it is almost always a missing comma or a b
 
 **Step C — create its access key**
 
-1. Open the user **gitlab-ci-scaa** → **Security credentials** tab → **Access keys** → **Create access key**.
-2. Use case: choose **Third-party service** (GitLab is a third-party CI) or **Command Line Interface (CLI)** — both produce an identical key; the choice only changes the warning text.
-3. Tick the confirmation box → **Next** → Description tag: `gitlab-ci` → **Create access key**.
+1. Open the user **github-ci-scaa** → **Security credentials** tab → **Access keys** → **Create access key**.
+2. Use case: choose **Third-party service** (GitHub Actions is a third-party CI) or **Command Line Interface (CLI)** — both produce an identical key; the choice only changes the warning text.
+3. Tick the confirmation box → **Next** → Description tag: `github-actions` → **Create access key**.
 4. **Download .csv file** and keep it outside the repository. The secret is shown once.
 
 **Step D — where these keys go**
 
 | Value | Goes to |
 |---|---|
-| `AccessKeyId` | GitLab → Settings → CI/CD → Variables → `AWS_ACCESS_KEY_ID` (masked, protected) |
-| `SecretAccessKey` | GitLab → `AWS_SECRET_ACCESS_KEY` (masked, protected) |
-| `eu-central-1` | GitLab → `AWS_DEFAULT_REGION` |
-| your bucket name | GitLab → `TF_STATE_BUCKET` |
+| `AccessKeyId` | GitHub → Settings → Environments → `production` → **Environment secrets** → `AWS_ACCESS_KEY_ID` |
+| `SecretAccessKey` | GitHub → same page → **Environment secrets** → `AWS_SECRET_ACCESS_KEY` |
+| `eu-central-1` | GitHub → Settings → Secrets and variables → Actions → **Variables** → `AWS_REGION` |
+| your bucket name | GitHub → same page → **Variables** → `TF_STATE_BUCKET` |
 
-Section 6.2 shows the exact GitLab screen. **These four values never appear in a file inside the repository.**
+Section 6.2 shows the exact GitHub screen. **These four values never appear in a file inside the repository.**
 
 **Step E — test the robot key without breaking your own login**
 
@@ -951,7 +952,7 @@ Never overwrite your `nika-admin` profile with the CI key. Use a **named profile
 ```powershell
 # Creates a second profile called "ci" - your default profile stays untouched
 aws configure --profile ci
-# paste the gitlab-ci-scaa key id, secret, region eu-central-1, output json
+# paste the github-ci-scaa key id, secret, region eu-central-1, output json
 
 # Who am I with that key?
 aws sts get-caller-identity --profile ci
@@ -967,7 +968,7 @@ aws iam create-user --user-name should-not-work --profile ci
 Expected results:
 
 ```
-Arn ends with :user/gitlab-ci-scaa       <- right identity
+Arn ends with :user/github-ci-scaa       <- right identity
 s3 ls prints nothing                     <- bucket reachable, still empty
 create-user -> AccessDenied              <- least privilege proven
 ```
@@ -1036,7 +1037,7 @@ This is the part beginners get wrong. An empty console feels like something is m
 | CloudWatch alarms + dashboard | `scaa-final-dev-...` | Terraform, sections 5.8 / 5.11 |
 | EC2 instance | `scaa-final-dev-web` | Terraform, section 5.9 |
 | Elastic IP | attached to that instance | Terraform, section 5.9 |
-| The Docker image inside ECR | tagged with the commit SHA | the GitLab pipeline, section 6.3 |
+| The Docker image inside ECR | tagged with the commit SHA | the GitHub Actions pipeline, section 6.3 |
 
 **What happens if you create one anyway?** Terraform does not adopt existing resources. You get an error like:
 
@@ -1087,16 +1088,16 @@ $pab = aws s3api get-public-access-block --bucket $bucket --output json | Conver
 Check "public access fully blocked" ($pab.PublicAccessBlockConfiguration.BlockPublicAcls -and $pab.PublicAccessBlockConfiguration.RestrictPublicBuckets)
 
 # 6. CI user exists
-$u = aws iam get-user --user-name gitlab-ci-scaa --output json 2>$null | ConvertFrom-Json
-Check "IAM user gitlab-ci-scaa exists" ($null -ne $u)
+$u = aws iam get-user --user-name github-ci-scaa --output json 2>$null | ConvertFrom-Json
+Check "IAM user github-ci-scaa exists" ($null -ne $u)
 
 # 7. CI user has a policy (inline from 4.3 OR managed from 4A.6)
-$inline  = (aws iam list-user-policies --user-name gitlab-ci-scaa --output json 2>$null | ConvertFrom-Json).PolicyNames
-$managed = (aws iam list-attached-user-policies --user-name gitlab-ci-scaa --output json 2>$null | ConvertFrom-Json).AttachedPolicies
+$inline  = (aws iam list-user-policies --user-name github-ci-scaa --output json 2>$null | ConvertFrom-Json).PolicyNames
+$managed = (aws iam list-attached-user-policies --user-name github-ci-scaa --output json 2>$null | ConvertFrom-Json).AttachedPolicies
 Check "CI user has a permissions policy" (($inline.Count + $managed.Count) -gt 0)
 
 # 8. CI user has exactly one active access key
-$keys = (aws iam list-access-keys --user-name gitlab-ci-scaa --output json 2>$null | ConvertFrom-Json).AccessKeyMetadata
+$keys = (aws iam list-access-keys --user-name github-ci-scaa --output json 2>$null | ConvertFrom-Json).AccessKeyMetadata
 Check "CI user has 1 access key" ($keys.Count -eq 1)
 
 # 9. Default VPC + at least 2 default subnets
@@ -1121,12 +1122,12 @@ Write these down in a note on your laptop (never in the repository). Every later
 | Value | Example | Where you need it later |
 |---|---|---|
 | AWS account ID | `123456789012` | the ECR image URL, reading error messages |
-| Region | `eu-central-1` | GitLab variable `AWS_DEFAULT_REGION`, `variables.tf` |
-| State bucket name | `scaa-final-tfstate-nika-7431` | GitLab variable `TF_STATE_BUCKET`, `ci-policy.json` |
-| CI access key ID | `AKIA...` | GitLab variable `AWS_ACCESS_KEY_ID` |
-| CI secret access key | `wJal...` | GitLab variable `AWS_SECRET_ACCESS_KEY` |
+| Region | `eu-central-1` | GitHub **variable** `AWS_REGION`, `variables.tf` |
+| State bucket name | `scaa-final-tfstate-nika-7431` | GitHub **variable** `TF_STATE_BUCKET`, `ci-policy.json` |
+| CI access key ID | `AKIA...` | GitHub **environment secret** `AWS_ACCESS_KEY_ID` |
+| CI secret access key | `wJal...` | GitHub **environment secret** `AWS_SECRET_ACCESS_KEY` |
 
-**If you lose the secret:** IAM → Users → `gitlab-ci-scaa` → Security credentials → deactivate and delete the old key → **Create access key** → put the new pair into GitLab. Nothing else breaks; keys are disposable.
+**If you lose the secret:** IAM → Users → `github-ci-scaa` → Security credentials → deactivate and delete the old key → **Create access key** → put the new pair into GitHub (Settings → Environments → `production` → Environment secrets). Nothing else breaks; keys are disposable.
 
 **If a key ever leaks** (pushed to Git, pasted in a chat): delete it *first*, then worry. IAM → the user → Security credentials → Actions → **Delete**. A deleted key is dead immediately.
 
@@ -1150,7 +1151,7 @@ Write these down in a note on your laptop (never in the repository). Every later
 | Console shows "0 buckets" / "no instances" | You are in the wrong region | Switch the region selector back to Frankfurt |
 
 > **How to read an AWS permission error.** A message like
-> `User: arn:aws:iam::123456789012:user/gitlab-ci-scaa is not authorized to perform: ec2:DescribeAddresses`
+> `User: arn:aws:iam::123456789012:user/github-ci-scaa is not authorized to perform: ec2:DescribeAddresses`
 > tells you three things: **who** (the CI user), **what** (`ec2:DescribeAddresses`) and therefore **the fix** (add `ec2:DescribeAddresses` to the policy). You never have to guess — the missing action is printed literally.
 
 ---
@@ -1159,7 +1160,7 @@ Write these down in a note on your laptop (never in the repository). Every later
 
 While the account is small and clean, these are quick to capture and they cover several grading points:
 
-1. **IAM → Users** list showing `nika-admin` and `gitlab-ci-scaa` — proves separation of human and machine identities.
+1. **IAM → Users** list showing `nika-admin` and `github-ci-scaa` — proves separation of human and machine identities.
 2. **Root Security credentials** page showing MFA assigned and no access keys.
 3. **IAM → Policies → scaa-final-ci-policy** (JSON tab) — proves least privilege.
 4. The `AccessDenied` output of `aws iam create-user --profile ci` from 4A.6 Step E — proves the limits actually work.
@@ -1176,7 +1177,7 @@ Section 12 lists the screenshots for the later steps.
 AWS account 123456789012
 ├── IAM (global)
 │   ├── user nika-admin        (AdministratorAccess, console + MFA + CLI key)  <- you
-│   ├── user gitlab-ci-scaa    (scaa-final-ci-policy, one access key, no console) <- the pipeline
+│   ├── user github-ci-scaa    (scaa-final-ci-policy, one access key, no console) <- the pipeline
 │   └── policy scaa-final-ci-policy
 ├── S3 (global names, stored in eu-central-1)
 │   └── scaa-final-tfstate-nika-7431   (empty, versioned, encrypted, private)
@@ -1349,7 +1350,7 @@ variable "owner" {
 variable "repository_url" {
   description = "Source repository, shown in tags."
   type        = string
-  default     = "https://gitlab.com/CHANGE-ME/scaa-finalproject"
+  default     = "https://github.com/nikachkharti/SCAA-FinalProject"
 }
 
 # ---------------------------------------------------------------------- app
@@ -2481,7 +2482,7 @@ aws_region     = "eu-central-1"
 project_name   = "scaa-final"
 environment    = "dev"
 owner          = "Nikoloz Chkhartishvili"
-repository_url = "https://gitlab.com/YOUR-USERNAME/scaa-finalproject"
+repository_url = "https://github.com/nikachkharti/SCAA-FinalProject.git"
 
 instance_type    = "t3.micro"
 root_volume_size = 20
@@ -2495,7 +2496,7 @@ log_retention_days = 7
 cpu_alarm_threshold = 80
 ```
 
-> Change `repository_url` to your real GitLab URL once you create the project.
+> Change `repository_url` to your own GitHub URL if your user name is different.
 
 ---
 
@@ -2532,464 +2533,678 @@ You should see roughly `Plan: 16 to add, 0 to change, 0 to destroy.`
 
 ---
 
-<a name="6-step-4-gitlab-cicd"></a>
+<a name="6-step-4-github-actions"></a>
 
-## 6. Step 4 — GitLab CI/CD pipeline
+## 6. Step 4 — GitHub Actions CI/CD pipeline
 
-### 6.1 Move the repository to GitLab
+### 6.1 Your repository is already on GitHub — prepare it
 
-1. Go to https://gitlab.com → **New project** → **Create blank project**.
-2. Name: `scaa-finalproject`. Visibility: **Private** (or Public if your teacher needs to see it).
-3. **Uncheck** "Initialize repository with a README".
-4. Click **Create project** and copy the HTTPS URL, for example
-   `https://gitlab.com/nikachkharti/scaa-finalproject.git`.
-
-Then, in PowerShell:
+Your code is already at `https://github.com/nikachkharti/SCAA-FinalProject.git`, so there is nothing to move. Check that the remote and the branch are what the pipeline expects:
 
 ```powershell
 cd C:\Users\User\Desktop\SCAA-FinalProject
 
-# Keep GitHub as "origin", add GitLab as a second remote called "gitlab"
-git remote add gitlab https://gitlab.com/YOUR-USERNAME/scaa-finalproject.git
-
-# Check
-git remote -v
+git remote -v          # origin -> https://github.com/nikachkharti/SCAA-FinalProject.git
+git branch --show-current   # main
 ```
 
-When you push later:
+Both must say `origin` and `main`. If your default branch is called `master`, either rename it (`git branch -m master main` and push), or change every `main` in the workflow files below to `master`.
+
+**Three settings to check in the GitHub web UI:**
+
+1. **Actions are enabled** — **Settings → Actions → General → Actions permissions** → *Allow all actions and reusable workflows*. On a new repository this is already on.
+2. **Workflow permissions** — same page, scroll down → **Workflow permissions** → *Read repository contents and packages permissions* is enough. This project never writes back to the repository.
+3. **Protect `main`** — **Settings → Branches → Add branch ruleset** (or *Add rule* on the classic screen) → branch name pattern `main` → tick **Require a pull request before merging** if you want the full flow, or at minimum **Restrict deletions** and **Block force pushes**.
+   Protecting `main` matters because the AWS credentials are attached to an environment that only `main` may use (section 6.2).
+
+> **If the repository is private**, GitHub Actions gives a free plan 2,000 minutes per month. A full run of this pipeline uses about 10–15 minutes. If the repository is public, Actions minutes are unlimited and free.
+
+---
+
+### 6.2 Add the credentials to GitHub
+
+GitHub stores configuration in two places: **secrets** (encrypted, masked in every log) and **variables** (plain text, readable). The AWS keys go into secrets; the region and the bucket name go into variables.
+
+Do the three steps below **in this order** — the environment must exist before you can add environment secrets to it.
+
+**Step 1 — create the `production` environment**
+
+1. **Settings → Environments → New environment** → name it exactly `production` → **Configure environment**.
+2. Under **Deployment branches and tags** choose **Selected branches and tags**, then **Add deployment branch rule** twice:
+   * `main` — the branch that builds and deploys;
+   * `destroy` — the branch that triggers the destroy workflow (section 6.3).
+   Any other branch is now refused by this environment, so no experiment on a side branch can ever touch AWS.
+3. Optional, and nice for the report: tick **Required reviewers** and add yourself. The run then waits for your click before it changes anything in AWS.
+4. **Save protection rules**.
+
+**Step 2 — add the two AWS keys as *environment* secrets**
+
+Still on the `production` environment page, find **Environment secrets → Add secret**:
+
+| Name | Value |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | the key id from section 4.3 / 4A.6 |
+| `AWS_SECRET_ACCESS_KEY` | the secret from section 4.3 / 4A.6 |
+
+**Environment** secrets, not repository secrets — that is the whole point. GitHub hands them out **only** to a job that says `environment: production`, and only when that job runs on an allowed branch. A job without that line simply does not receive them, so `build_and_test` (which runs on every pull request) has no access to your AWS account at all.
+
+**Step 3 — add the two non-secret values as repository variables**
+
+**Settings → Secrets and variables → Actions → Variables tab → New repository variable**:
+
+| Name | Value |
+|---|---|
+| `AWS_REGION` | `eu-central-1` |
+| `TF_STATE_BUCKET` | `scaa-final-tfstate-nika-7431` |
+
+These two are not sensitive, and seeing them printed in the log makes debugging much easier. In the workflow files they are read as `${{ secrets.NAME }}` and `${{ vars.NAME }}` — two different stores, so never mix the prefixes.
+
+> **This is exactly the "secure credentials management" the task asks for, in four layers:**
+> 1. no key is stored in Git — they live only in GitHub's encrypted store;
+> 2. every secret is replaced by `***` in the job log automatically, even if a command echoes it by accident;
+> 3. the keys are **environment** secrets, so only the three AWS jobs receive them;
+> 4. the `production` environment accepts only the `main` and `destroy` branches, and GitHub never gives secrets to a pull request coming from a fork.
+
+---
+
+### 6.3 Create the workflow files
+
+GitHub Actions reads every `.yml` file inside `.github/workflows/`. You will create two:
+
+| File | What it does | When it runs |
+|---|---|---|
+| `.github/workflows/ci-cd.yml` | build & test → terraform apply → deploy | every push and pull request; apply + deploy only on `main` |
+| `.github/workflows/destroy.yml` | terraform destroy | manual button, or push to a branch called `destroy` |
+
+Create the folders first:
 
 ```powershell
-git push gitlab main
+cd C:\Users\User\Desktop\SCAA-FinalProject
+New-Item -ItemType Directory -Force .github\workflows
 ```
 
-> **Simpler option:** if you do not need GitHub, just change origin:
-> `git remote set-url origin https://gitlab.com/YOUR-USERNAME/scaa-finalproject.git`
-> Then `git push -u origin main` works as usual.
+> **Indentation matters in YAML.** Use spaces, never tabs. If GitHub shows a red ❌ next to the file with "Invalid workflow file", the problem is almost always indentation.
 
-GitLab will ask for a password — use a **Personal Access Token**:
-**GitLab → your avatar → Edit profile → Access tokens → Add new token**, scope `write_repository`.
-
-### 6.2 Add the CI/CD variables
-
-In your GitLab project: **Settings → CI/CD → Variables → Add variable**.
-
-Add these four:
-
-| Key | Value | Type | Protect | Mask | Expand |
-|---|---|---|---|---|---|
-| `AWS_ACCESS_KEY_ID` | the key from section 4.3 | Variable | ✅ | ✅ | ✅ |
-| `AWS_SECRET_ACCESS_KEY` | the secret from section 4.3 | Variable | ✅ | ✅ | ✅ |
-| `AWS_DEFAULT_REGION` | `eu-central-1` | Variable | ✅ | ❌ | ✅ |
-| `TF_STATE_BUCKET` | `scaa-final-tfstate-nika-7431` | Variable | ✅ | ❌ | ✅ |
-
-**What the checkboxes mean:**
-
-* **Masked** — GitLab replaces the value with `[MASKED]` in the job log. Always mask secrets.
-* **Protected** — the variable is only given to jobs running on a *protected* branch or tag. This stops someone from opening a merge request with a malicious `.gitlab-ci.yml` and stealing your AWS keys.
-
-**Make `main` a protected branch:**
-**Settings → Repository → Protected branches** → `main` should already be protected. If not, protect it.
-
-> This is exactly the "secure credentials management" the task asks for: no keys in Git, masked in logs, only available to protected branches.
-
-### 6.3 Create `.gitlab-ci.yml`
-
-Put this file in the **repository root** (`C:\Users\User\Desktop\SCAA-FinalProject\.gitlab-ci.yml`):
+#### File 1 — `.github/workflows/ci-cd.yml`
 
 ```yaml
 # ===========================================================================
-# SCAA DevOps Final Project - CI/CD pipeline
+# SCAA DevOps Final Project - CI/CD pipeline (GitHub Actions)
 #
-# Stages:
-#   1. build_test       Build the Docker image and validate it (fail fast).
-#   2. terraform_apply  Create the AWS infrastructure.
-#   3. deploy           Push the image to ECR and start it on EC2 via SSM.
-#   4. destroy          Delete everything (manual, or automatic on the
-#                       "destroy" branch).
+# Jobs (the "stages" the task asks for):
+#   1. build_and_test      Build the Docker image and validate it (fail fast).
+#   2. terraform_apply     Create/update the AWS infrastructure.
+#   3. deploy_application  Push the image to ECR and start it on EC2 via SSM.
+#
+# Destroying is a separate workflow: .github/workflows/destroy.yml
 # ===========================================================================
+name: CI/CD Pipeline
 
-stages:
-  - build_test
-  - terraform_apply
-  - deploy
-  - destroy
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # lets you re-run the whole pipeline from the Actions tab
 
-variables:
-  # ---- Docker ----
-  DOCKER_TLS_CERTDIR: "/certs"          # secure connection to the dind service
-  DOCKER_BUILDKIT: "1"
+# A new push cancels the previous run of the same branch (saves free minutes),
+# but never on main - cancelling a running "terraform apply" would leave the
+# state file locked.
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# The pipeline only reads the repository. Least privilege for the token too.
+permissions:
+  contents: read
+
+env:
   # ---- Application ----
-  IMAGE_NAME: "scaa-final-web"
-  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"     # a unique, traceable tag per commit
-  DOCKER_CONTEXT_DIR: "SCAA-Final"
-  DOCKERFILE_PATH: "SCAA-Final/SCAA-Final-Web/Dockerfile"
+  IMAGE_NAME: scaa-final-web
+  DOCKER_CONTEXT_DIR: SCAA-Final
+  DOCKERFILE_PATH: SCAA-Final/SCAA-Final-Web/Dockerfile
   APP_PORT: "8080"
-
   # ---- Terraform ----
-  TF_DIR: "terraform"
   TF_VERSION: "1.13.3"
-  TF_IN_AUTOMATION: "true"              # cleaner, non-interactive output
-  TF_INPUT: "0"                         # never wait for keyboard input
+  TF_IN_AUTOMATION: "true" # cleaner, non-interactive output
+  TF_INPUT: "0" # never wait for keyboard input
 
-  # ---- Git ----
-  GIT_DEPTH: "10"                       # shallow clone = faster pipeline
+defaults:
+  run:
+    shell: bash
 
-default:
-  interruptible: true                   # a new push cancels the old pipeline
-  retry:
-    max: 1
-    when:
-      - runner_system_failure
-      - stuck_or_timeout_failure
+jobs:
+  # =========================================================================
+  # 1 - BUILD & TEST
+  # =========================================================================
+  build_and_test:
+    name: 1 - Build & test the image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
 
-# ---------------------------------------------------------------------------
-# Reusable pieces
-# ---------------------------------------------------------------------------
-.docker_job: &docker_job
-  image: docker:28-cli
-  services:
-    - name: docker:28-dind
-      alias: docker
-  before_script:
-    - set -euo pipefail
-    - apk add --no-cache curl jq aws-cli bash > /dev/null
-    - docker info > /dev/null
-    - echo "Runner is ready. Commit ${CI_COMMIT_SHORT_SHA} on branch ${CI_COMMIT_REF_NAME}."
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
 
-.terraform_job: &terraform_job
-  image:
-    name: hashicorp/terraform:$TF_VERSION
-    entrypoint: [""]
-  before_script:
-    - set -euo pipefail
-    - apk add --no-cache jq bash curl > /dev/null
-    - cd "$TF_DIR"
-    - echo "Initialising Terraform with backend bucket ${TF_STATE_BUCKET}"
-    - |
-      terraform init \
-        -input=false \
-        -reconfigure \
-        -backend-config="bucket=${TF_STATE_BUCKET}" \
-        -backend-config="region=${AWS_DEFAULT_REGION}" \
-        -backend-config="key=scaa-final/${CI_PROJECT_PATH_SLUG}/terraform.tfstate"
+      - name: Work out the image tag
+        id: meta
+        run: |
+          set -euo pipefail
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-8)
+          echo "image_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Building commit ${SHORT_SHA} on ${GITHUB_REF_NAME}"
 
-# ===========================================================================
-# STAGE 1 - BUILD & TEST
-# ===========================================================================
-build_and_test:
-  <<: *docker_job
-  stage: build_test
-  script:
-    - echo "===== Building the Docker image ====="
-    - |
-      docker build \
-        --pull \
-        --file "$DOCKERFILE_PATH" \
-        --tag "$IMAGE_NAME:$IMAGE_TAG" \
-        --build-arg APP_VERSION="$IMAGE_TAG" \
-        --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --build-arg VCS_REF="$CI_COMMIT_SHA" \
-        "$DOCKER_CONTEXT_DIR"
+      - name: Build the Docker image
+        run: |
+          set -euo pipefail
+          echo "===== Building the Docker image ====="
+          docker build \
+            --pull \
+            --file "$DOCKERFILE_PATH" \
+            --tag "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}" \
+            --build-arg APP_VERSION="${{ steps.meta.outputs.image_tag }}" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg VCS_REF="${GITHUB_SHA}" \
+            "$DOCKER_CONTEXT_DIR"
 
-    - echo "===== Checking the image metadata (author + version) ====="
-    - docker inspect "$IMAGE_NAME:$IMAGE_TAG" --format '{{json .Config.Labels}}' | jq .
-    - |
-      AUTHORS=$(docker inspect "$IMAGE_NAME:$IMAGE_TAG" \
-                 --format '{{index .Config.Labels "org.opencontainers.image.authors"}}')
-      VERSION=$(docker inspect "$IMAGE_NAME:$IMAGE_TAG" \
-                 --format '{{index .Config.Labels "org.opencontainers.image.version"}}')
-      if [ -z "$AUTHORS" ] || [ -z "$VERSION" ]; then
-        echo "FAIL: required image metadata is missing."
-        exit 1
-      fi
-      echo "OK: author='$AUTHORS' version='$VERSION'"
+      - name: Check the image metadata (author + version)
+        run: |
+          set -euo pipefail
+          echo "===== Image labels ====="
+          docker inspect "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}" \
+            --format '{{json .Config.Labels}}' | jq .
+          AUTHORS=$(docker inspect "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}" \
+                     --format '{{index .Config.Labels "org.opencontainers.image.authors"}}')
+          VERSION=$(docker inspect "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}" \
+                     --format '{{index .Config.Labels "org.opencontainers.image.version"}}')
+          if [ -z "$AUTHORS" ] || [ -z "$VERSION" ]; then
+            echo "FAIL: required image metadata is missing."
+            exit 1
+          fi
+          echo "OK: author='$AUTHORS' version='$VERSION'"
 
-    - echo "===== Checking that the container does NOT run as root ====="
-    - |
-      UID_IN_IMAGE=$(docker run --rm --entrypoint sh "$IMAGE_NAME:$IMAGE_TAG" -c 'id -u')
-      echo "Container runs as UID $UID_IN_IMAGE"
-      if [ "$UID_IN_IMAGE" = "0" ]; then
-        echo "FAIL: the container runs as root."
-        exit 1
-      fi
-      echo "OK: non-root user."
+      - name: Check that the container does NOT run as root
+        run: |
+          set -euo pipefail
+          UID_IN_IMAGE=$(docker run --rm --entrypoint sh \
+            "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}" -c 'id -u')
+          echo "Container runs as UID $UID_IN_IMAGE"
+          if [ "$UID_IN_IMAGE" = "0" ]; then
+            echo "FAIL: the container runs as root."
+            exit 1
+          fi
+          echo "OK: non-root user."
 
-    - echo "===== Smoke test: start the container and call /health ====="
-    # Ports are published on the dind service, which the job reaches
-    # at the hostname "docker".
-    - docker run -d --name smoke -p 8080:8080 "$IMAGE_NAME:$IMAGE_TAG"
-    - |
-      OK=0
-      for i in $(seq 1 30); do
-        if curl -fsS "http://docker:8080/health" > /dev/null 2>&1; then
-          OK=1
-          echo "Health check passed on attempt $i."
-          break
-        fi
-        echo "Attempt $i/30 - waiting for the application..."
-        sleep 2
-      done
-      if [ "$OK" -ne 1 ]; then
-        echo "FAIL: /health never answered. Container logs:"
-        docker logs smoke || true
-        exit 1
-      fi
+      - name: Smoke test - start the container and call /health
+        run: |
+          set -euo pipefail
+          echo "===== Starting the container ====="
+          docker run -d --name smoke -p 8080:8080 \
+            "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}"
+          OK=0
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:8080/health" > /dev/null 2>&1; then
+              OK=1
+              echo "Health check passed on attempt $i."
+              break
+            fi
+            echo "Attempt $i/30 - waiting for the application..."
+            sleep 2
+          done
+          if [ "$OK" -ne 1 ]; then
+            echo "FAIL: /health never answered. Container logs:"
+            docker logs smoke || true
+            exit 1
+          fi
 
-    - echo "===== Checking the home page and /version ====="
-    - curl -fsS -o /dev/null -w "GET /          -> HTTP %{http_code}\n" http://docker:8080/
-    - curl -fsS -w "\n" http://docker:8080/version
-    - curl -fsS -w "\n" http://docker:8080/health
+      - name: Check the home page and /version
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null -w "GET /          -> HTTP %{http_code}\n" http://localhost:8080/
+          curl -fsS -w "\n" http://localhost:8080/version
+          curl -fsS -w "\n" http://localhost:8080/health
 
-    - echo "===== Application logs from the smoke test ====="
-    - docker logs smoke
+      - name: Application logs from the smoke test
+        run: docker logs smoke
 
-    - echo "===== Saving the image so the deploy job can reuse it ====="
-    - mkdir -p image
-    - docker save "$IMAGE_NAME:$IMAGE_TAG" | gzip -1 > image/app.tar.gz
-    - ls -lh image/app.tar.gz
+      - name: Save the image so the deploy job can reuse it
+        run: |
+          set -euo pipefail
+          mkdir -p image
+          docker save "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}" | gzip -1 > image/app.tar.gz
+          ls -lh image/app.tar.gz
 
-  after_script:
-    # Cleanup runs even when the script above fails.
-    - docker rm -f smoke > /dev/null 2>&1 || true
-    - docker image prune -af > /dev/null 2>&1 || true
-    - echo "Local Docker cleanup done."
+      - name: Upload the image as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-image-${{ steps.meta.outputs.image_tag }}
+          path: image/app.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
-  artifacts:
-    name: "image-$CI_COMMIT_SHORT_SHA"
-    paths:
-      - image/app.tar.gz
-    expire_in: 1 day
+      # Runs even when a step above failed - this is the "cleanup" requirement.
+      - name: Clean up local Docker objects
+        if: always()
+        run: |
+          docker rm -f smoke > /dev/null 2>&1 || true
+          docker image prune -af > /dev/null 2>&1 || true
+          echo "Local Docker cleanup done."
 
-  rules:
-    - if: $CI_COMMIT_BRANCH == "destroy"
-      when: never
-    - when: always
+  # =========================================================================
+  # 2 - TERRAFORM APPLY
+  # =========================================================================
+  terraform_apply:
+    name: 2 - Terraform apply
+    needs: build_and_test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production # only branch "main" may use this environment
+    outputs:
+      ecr_url: ${{ steps.tf_out.outputs.ecr_url }}
+      instance_id: ${{ steps.tf_out.outputs.instance_id }}
+      app_url: ${{ steps.tf_out.outputs.app_url }}
+      health_url: ${{ steps.tf_out.outputs.health_url }}
 
-# ===========================================================================
-# STAGE 2 - TERRAFORM APPLY
-# ===========================================================================
-terraform_apply:
-  <<: *terraform_job
-  stage: terraform_apply
-  needs: ["build_and_test"]
-  environment:
-    name: production
-    url: $DYNAMIC_ENVIRONMENT_URL
-  script:
-    - echo "===== Checking formatting ====="
-    - terraform fmt -check -recursive -diff
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
 
-    - echo "===== Validating the configuration ====="
-    - terraform validate
+      - name: Check that the required configuration exists
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TF_STATE_BUCKET}" ]; then
+            echo "FAIL: repository variable TF_STATE_BUCKET is not set (Settings -> Secrets and variables -> Actions -> Variables)."
+            exit 1
+          fi
+          if [ -z "${AWS_REGION}" ]; then
+            echo "FAIL: repository variable AWS_REGION is not set."
+            exit 1
+          fi
+          echo "OK: bucket=${TF_STATE_BUCKET} region=${AWS_REGION}"
 
-    - echo "===== Planning ====="
-    - terraform plan -input=false -var="image_tag=$IMAGE_TAG" -out=tfplan
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-    - echo "===== Applying ====="
-    - terraform apply -input=false -auto-approve tfplan
+      - name: Show which AWS identity the pipeline uses
+        run: aws sts get-caller-identity
 
-    - echo "===== Outputs ====="
-    - terraform output
-    - terraform output -json > "$CI_PROJECT_DIR/tf_output.json"
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false # keep the raw output, so our own checks work
 
-    - |
-      APP_URL=$(jq -r '.application_url.value' "$CI_PROJECT_DIR/tf_output.json")
-      echo "DYNAMIC_ENVIRONMENT_URL=$APP_URL" >> "$CI_PROJECT_DIR/deploy.env"
-      echo "Infrastructure is ready. Application URL: $APP_URL"
+      - name: Terraform init (remote state in S3)
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          echo "===== Initialising Terraform with bucket ${{ vars.TF_STATE_BUCKET }} ====="
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
 
-  artifacts:
-    name: "tfoutput-$CI_COMMIT_SHORT_SHA"
-    paths:
-      - tf_output.json
-    reports:
-      dotenv: deploy.env
-    expire_in: 1 day
+      - name: Terraform fmt check
+        working-directory: terraform
+        run: |
+          echo "===== Checking formatting ====="
+          terraform fmt -check -recursive -diff
 
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: on_success
-    - when: never
+      - name: Terraform validate
+        working-directory: terraform
+        run: |
+          echo "===== Validating the configuration ====="
+          terraform validate
 
-# ===========================================================================
-# STAGE 3 - DEPLOY APPLICATION
-# ===========================================================================
-deploy_application:
-  <<: *docker_job
-  stage: deploy
-  needs:
-    - job: build_and_test
-      artifacts: true
-    - job: terraform_apply
-      artifacts: true
-  environment:
-    name: production
-    url: $DYNAMIC_ENVIRONMENT_URL
-  script:
-    - echo "===== Reading Terraform outputs ====="
-    - ECR_URL=$(jq -r '.ecr_repository_url.value' tf_output.json)
-    - INSTANCE_ID=$(jq -r '.instance_id.value' tf_output.json)
-    - APP_URL=$(jq -r '.application_url.value' tf_output.json)
-    - HEALTH_URL=$(jq -r '.health_check_url.value' tf_output.json)
-    - REGISTRY=$(echo "$ECR_URL" | cut -d/ -f1)
-    - echo "ECR=$ECR_URL  INSTANCE=$INSTANCE_ID  URL=$APP_URL"
+      - name: Terraform plan
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          echo "===== Planning ====="
+          terraform plan -input=false \
+            -var="image_tag=${{ needs.build_and_test.outputs.image_tag }}" \
+            -out=tfplan
 
-    - echo "===== Loading the image built in stage 1 ====="
-    - gunzip -c image/app.tar.gz | docker load
-    - docker images "$IMAGE_NAME"
+      - name: Terraform apply
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          echo "===== Applying ====="
+          terraform apply -input=false -auto-approve tfplan
 
-    - echo "===== Logging in to ECR ====="
-    - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+      - name: Read the Terraform outputs
+        id: tf_out
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          echo "===== Outputs ====="
+          terraform output
+          terraform output -json > tf_output.json
+          {
+            echo "ecr_url=$(jq -r '.ecr_repository_url.value' tf_output.json)"
+            echo "instance_id=$(jq -r '.instance_id.value' tf_output.json)"
+            echo "app_url=$(jq -r '.application_url.value' tf_output.json)"
+            echo "health_url=$(jq -r '.health_check_url.value' tf_output.json)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Infrastructure is ready at $(jq -r '.application_url.value' tf_output.json)"
 
-    - echo "===== Tagging and pushing ====="
-    - docker tag "$IMAGE_NAME:$IMAGE_TAG" "$ECR_URL:$IMAGE_TAG"
-    - docker tag "$IMAGE_NAME:$IMAGE_TAG" "$ECR_URL:latest"
-    - docker push "$ECR_URL:$IMAGE_TAG"
-    - docker push "$ECR_URL:latest"
+      - name: Upload the Terraform outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs-${{ needs.build_and_test.outputs.image_tag }}
+          path: terraform/tf_output.json
+          retention-days: 1
+          if-no-files-found: error
 
-    - echo "===== Waiting until the instance is registered in SSM ====="
-    - |
-      READY=0
-      for i in $(seq 1 40); do
-        STATUS=$(aws ssm describe-instance-information \
-                  --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
-                  --query 'InstanceInformationList[0].PingStatus' \
-                  --output text 2>/dev/null || echo "None")
-        if [ "$STATUS" = "Online" ]; then
-          READY=1
-          echo "Instance is online in SSM (attempt $i)."
-          break
-        fi
-        echo "Attempt $i/40 - SSM status: $STATUS"
-        sleep 15
-      done
-      if [ "$READY" -ne 1 ]; then
-        echo "FAIL: the instance never appeared in SSM."
-        exit 1
-      fi
+  # =========================================================================
+  # 3 - DEPLOY THE APPLICATION
+  # =========================================================================
+  deploy_application:
+    name: 3 - Deploy to EC2
+    needs: [build_and_test, terraform_apply]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ needs.terraform_apply.outputs.app_url }}
 
-    - echo "===== Running the deployment on the EC2 instance ====="
-    - |
-      COMMAND_ID=$(aws ssm send-command \
-        --instance-ids "$INSTANCE_ID" \
-        --document-name "AWS-RunShellScript" \
-        --comment "Deploy $IMAGE_TAG from pipeline $CI_PIPELINE_ID" \
-        --parameters "commands=[\"/usr/local/bin/deploy-app.sh $IMAGE_TAG\"]" \
-        --timeout-seconds 600 \
-        --query 'Command.CommandId' \
-        --output text)
-      echo "SSM command id: $COMMAND_ID"
+    env:
+      IMAGE_TAG: ${{ needs.build_and_test.outputs.image_tag }}
+      ECR_URL: ${{ needs.terraform_apply.outputs.ecr_url }}
+      INSTANCE_ID: ${{ needs.terraform_apply.outputs.instance_id }}
+      APP_URL: ${{ needs.terraform_apply.outputs.app_url }}
+      HEALTH_URL: ${{ needs.terraform_apply.outputs.health_url }}
 
-      # Wait for it to finish (the waiter can time out; we check the status next).
-      aws ssm wait command-executed \
-        --command-id "$COMMAND_ID" \
-        --instance-id "$INSTANCE_ID" || true
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      RESULT=$(aws ssm get-command-invocation \
-        --command-id "$COMMAND_ID" \
-        --instance-id "$INSTANCE_ID")
+      - name: Show what will be deployed
+        run: |
+          echo "ECR      = $ECR_URL"
+          echo "INSTANCE = $INSTANCE_ID"
+          echo "URL      = $APP_URL"
+          echo "TAG      = $IMAGE_TAG"
 
-      echo "----- remote stdout -----"
-      echo "$RESULT" | jq -r '.StandardOutputContent'
-      echo "----- remote stderr -----"
-      echo "$RESULT" | jq -r '.StandardErrorContent'
+      - name: Download the image built in job 1
+        uses: actions/download-artifact@v4
+        with:
+          name: app-image-${{ needs.build_and_test.outputs.image_tag }}
+          path: image
 
-      STATUS=$(echo "$RESULT" | jq -r '.Status')
-      echo "Remote command status: $STATUS"
-      if [ "$STATUS" != "Success" ]; then
-        echo "FAIL: the deployment on EC2 did not succeed."
-        exit 1
-      fi
+      - name: Load the image into the runner's Docker
+        run: |
+          set -euo pipefail
+          echo "===== Loading the image ====="
+          gunzip -c image/app.tar.gz | docker load
+          docker images "$IMAGE_NAME"
 
-    - echo "===== Verifying the public URL ====="
-    - |
-      OK=0
-      for i in $(seq 1 20); do
-        CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" || echo "000")
-        if [ "$CODE" = "200" ]; then
-          OK=1
-          echo "Public health check returned 200 on attempt $i."
-          break
-        fi
-        echo "Attempt $i/20 - got HTTP $CODE"
-        sleep 6
-      done
-      if [ "$OK" -ne 1 ]; then
-        echo "FAIL: the application is not reachable at $HEALTH_URL"
-        exit 1
-      fi
+      - name: Log in to Amazon ECR
+        run: |
+          set -euo pipefail
+          REGISTRY=$(echo "$ECR_URL" | cut -d/ -f1)
+          echo "===== Logging in to $REGISTRY ====="
+          aws ecr get-login-password --region "${{ vars.AWS_REGION }}" \
+            | docker login --username AWS --password-stdin "$REGISTRY"
 
-    - echo "===== Deployed version ====="
-    - curl -fsS --max-time 10 "$APP_URL/version"; echo
-    - echo ""
-    - echo "==============================================================="
-    - echo " DEPLOYMENT SUCCESSFUL"
-    - echo " Application : $APP_URL"
-    - echo " Health      : $HEALTH_URL"
-    - echo " Image tag   : $IMAGE_TAG"
-    - echo "==============================================================="
+      - name: Tag and push the image
+        run: |
+          set -euo pipefail
+          echo "===== Tagging and pushing ====="
+          docker tag "$IMAGE_NAME:$IMAGE_TAG" "$ECR_URL:$IMAGE_TAG"
+          docker tag "$IMAGE_NAME:$IMAGE_TAG" "$ECR_URL:latest"
+          docker push "$ECR_URL:$IMAGE_TAG"
+          docker push "$ECR_URL:latest"
 
-  after_script:
-    - docker image prune -af > /dev/null 2>&1 || true
-    - docker logout "$(jq -r '.ecr_repository_url.value' tf_output.json 2>/dev/null | cut -d/ -f1)" > /dev/null 2>&1 || true
-    - echo "Local Docker cleanup done."
+      - name: Wait until the instance is registered in SSM
+        run: |
+          set -euo pipefail
+          echo "===== Waiting for SSM ====="
+          READY=0
+          for i in $(seq 1 40); do
+            STATUS=$(aws ssm describe-instance-information \
+                      --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+                      --query 'InstanceInformationList[0].PingStatus' \
+                      --output text 2>/dev/null || echo "None")
+            if [ "$STATUS" = "Online" ]; then
+              READY=1
+              echo "Instance is online in SSM (attempt $i)."
+              break
+            fi
+            echo "Attempt $i/40 - SSM status: $STATUS"
+            sleep 15
+          done
+          if [ "$READY" -ne 1 ]; then
+            echo "FAIL: the instance never appeared in SSM."
+            exit 1
+          fi
 
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: on_success
-    - when: never
+      - name: Run the deployment on the EC2 instance (no SSH)
+        run: |
+          set -euo pipefail
+          echo "===== Sending the deploy command ====="
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy $IMAGE_TAG from GitHub Actions run $GITHUB_RUN_ID" \
+            --parameters "commands=[\"/usr/local/bin/deploy-app.sh $IMAGE_TAG\"]" \
+            --timeout-seconds 600 \
+            --query 'Command.CommandId' \
+            --output text)
+          echo "SSM command id: $COMMAND_ID"
 
-# ===========================================================================
-# STAGE 4 - DESTROY
-# ===========================================================================
+          # The waiter can time out; we read the real status right after.
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" || true
 
-# 4a. Manual button on main. Click it when you finish working.
-terraform_destroy_manual:
-  <<: *terraform_job
-  stage: destroy
-  needs: []
-  environment:
-    name: production
-    action: stop
-  script:
-    - echo "===== DESTROYING ALL INFRASTRUCTURE ====="
-    - terraform plan -destroy -input=false -var="image_tag=$IMAGE_TAG" -out=destroy.tfplan
-    - terraform apply -input=false -auto-approve destroy.tfplan
-    - echo "All AWS resources for this project have been deleted."
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: manual
-      allow_failure: true
-    - when: never
+          RESULT=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID")
 
-# 4b. Automatic destroy: push to a branch named "destroy".
-#     Shows the "different branch trigger" option from the task.
-terraform_destroy_on_branch:
-  <<: *terraform_job
-  stage: destroy
-  needs: []
-  script:
-    - echo "===== Branch 'destroy' detected - removing infrastructure ====="
-    - terraform destroy -input=false -auto-approve -var="image_tag=latest"
-    - echo "All AWS resources for this project have been deleted."
-  rules:
-    - if: $CI_COMMIT_BRANCH == "destroy"
-      when: always
-    - when: never
+          echo "----- remote stdout -----"
+          echo "$RESULT" | jq -r '.StandardOutputContent'
+          echo "----- remote stderr -----"
+          echo "$RESULT" | jq -r '.StandardErrorContent'
+
+          STATUS=$(echo "$RESULT" | jq -r '.Status')
+          echo "Remote command status: $STATUS"
+          if [ "$STATUS" != "Success" ]; then
+            echo "FAIL: the deployment on EC2 did not succeed."
+            exit 1
+          fi
+
+      - name: Verify the public URL
+        run: |
+          set -euo pipefail
+          echo "===== Verifying $HEALTH_URL ====="
+          OK=0
+          for i in $(seq 1 20); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" || echo "000")
+            if [ "$CODE" = "200" ]; then
+              OK=1
+              echo "Public health check returned 200 on attempt $i."
+              break
+            fi
+            echo "Attempt $i/20 - got HTTP $CODE"
+            sleep 6
+          done
+          if [ "$OK" -ne 1 ]; then
+            echo "FAIL: the application is not reachable at $HEALTH_URL"
+            exit 1
+          fi
+
+      - name: Show the deployed version and write the run summary
+        run: |
+          set -euo pipefail
+          echo "===== Deployed version ====="
+          curl -fsS --max-time 10 "$APP_URL/version"; echo
+          echo "==============================================================="
+          echo " DEPLOYMENT SUCCESSFUL"
+          echo " Application : $APP_URL"
+          echo " Health      : $HEALTH_URL"
+          echo " Image tag   : $IMAGE_TAG"
+          echo "==============================================================="
+          {
+            echo "## Deployment successful"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Application | $APP_URL |"
+            echo "| Health check | $HEALTH_URL |"
+            echo "| Version endpoint | $APP_URL/version |"
+            echo "| Image tag | \`$IMAGE_TAG\` |"
+            echo "| Instance | \`$INSTANCE_ID\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up local Docker objects
+        if: always()
+        run: |
+          REGISTRY=$(echo "${ECR_URL:-}" | cut -d/ -f1)
+          docker image prune -af > /dev/null 2>&1 || true
+          docker logout "$REGISTRY" > /dev/null 2>&1 || true
+          echo "Local Docker cleanup done."
 ```
+
+#### File 2 — `.github/workflows/destroy.yml`
+
+```yaml
+# ===========================================================================
+# SCAA DevOps Final Project - destroy the infrastructure
+#
+# Two ways to trigger it, both required by the task:
+#   A. manual  - Actions tab -> "Destroy Infrastructure" -> Run workflow
+#   B. branch  - push to a branch named "destroy"
+# ===========================================================================
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DESTROY (capital letters) to confirm'
+        required: true
+        default: ''
+  push:
+    branches: [destroy]
+
+concurrency:
+  group: scaa-final-destroy # never run two destroys at the same time
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "1.13.3"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  terraform_destroy:
+    name: Destroy all AWS resources
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    # Manual runs must be confirmed; a push to the destroy branch always runs.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.inputs.confirm == 'DESTROY'
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: Terraform destroy
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          echo "===== DESTROYING ALL INFRASTRUCTURE ====="
+          terraform plan -destroy -input=false -var="image_tag=latest" -out=destroy.tfplan
+          terraform apply -input=false -auto-approve destroy.tfplan
+          echo "All AWS resources for this project have been deleted."
+
+      - name: Write the run summary
+        if: always()
+        run: |
+          {
+            echo "## Destroy finished"
+            echo ""
+            echo "Triggered by: \`${{ github.event_name }}\`"
+            echo ""
+            echo "Remember: the S3 state bucket and the CI IAM user are NOT deleted -"
+            echo "they are the bootstrap, not project resources."
+          } >> "$GITHUB_STEP_SUMMARY"
+```
+
+> **Why two files instead of one?** In GitHub Actions a job cannot be "played" later like a manual button inside a finished run. The GitHub way to get a button is a separate workflow with `workflow_dispatch`. As a bonus, you can destroy without pushing any code.
+
+> **The Run workflow button only appears if the file is on the default branch.** Push `destroy.yml` to `main` first, otherwise you will not see it in the Actions tab.
+
+> **Both triggers need the `destroy` branch in the environment rules.** The job says `environment: production`, and in section 6.2 you allowed the branches `main` and `destroy`. If you skipped the second rule, a push to `destroy` fails immediately with *"Branch is not allowed to deploy to production"*.
+
+---
 
 ### 6.4 How the pipeline meets every requirement
 
 | Task requirement | Where it happens |
 |---|---|
-| Build & Test stage | `build_and_test` — builds, checks metadata, checks non-root, smoke-tests `/health` |
-| Terraform Apply stage | `terraform_apply` |
-| Deploy Application stage | `deploy_application` |
-| Terraform Destroy stage | `terraform_destroy_manual` (button) **and** `terraform_destroy_on_branch` (branch trigger) |
-| Secure AWS credentials | GitLab masked + protected variables; nothing in Git |
-| Fail fast | `set -euo pipefail`, explicit `exit 1` on every check, GitLab stops the pipeline on any failed job |
-| Clear logs | `echo "===== ... ====="` headers, remote stdout/stderr printed, attempt counters |
-| Local image cleanup | `after_script` with `docker image prune -af` in both Docker jobs |
+| Build & Test stage | job `build_and_test` — builds, checks labels, checks non-root, smoke-tests `/health`, `/`, `/version` |
+| Terraform Apply stage | job `terraform_apply` — `fmt -check`, `validate`, `plan`, `apply` |
+| Deploy Application stage | job `deploy_application` — ECR push + SSM run + public health check |
+| Terraform Destroy stage | workflow `destroy.yml` — manual **Run workflow** button **and** push to the `destroy` branch |
+| Secure AWS credentials | GitHub **environment** secrets on `production`, auto-masked in logs, handed only to jobs that declare that environment, and only from the `main` / `destroy` branches; nothing in Git |
+| Fail fast | `set -euo pipefail` in every script step, explicit `exit 1` on every check; GitHub stops the run and skips dependent jobs on the first failure |
+| Clear logs | `echo "===== ... ====="` headers, attempt counters, remote stdout/stderr printed back, plus a job summary table |
+| Local image cleanup | `if: always()` cleanup steps with `docker image prune -af` in both Docker jobs |
+| Traceable versioning | image tagged with the 8-character commit SHA, also baked into the image labels and `/version` |
+
+---
 
 ### 6.5 Push and watch the pipeline
 
@@ -2997,11 +3212,21 @@ terraform_destroy_on_branch:
 cd C:\Users\User\Desktop\SCAA-FinalProject
 
 git add .
-git commit -m "Add Docker metadata, health endpoint, Terraform IaC and GitLab CI/CD pipeline"
-git push gitlab main
+git commit -m "Add Docker metadata, health endpoint, Terraform IaC and GitHub Actions CI/CD pipeline"
+git push origin main
 ```
 
-Then open GitLab → **Build → Pipelines**. Click the running pipeline and watch each job.
+Then open your repository on GitHub → the **Actions** tab. Click the run at the top, and click a job on the left to watch its steps live.
+
+**What you should see:**
+
+```
+Actions
+└── CI/CD Pipeline  #1   main   ● running
+    ├── 1 - Build & test the image      ✔ 4m 12s
+    ├── 2 - Terraform apply             ✔ 3m 05s
+    └── 3 - Deploy to EC2               ● running
+```
 
 **Expected timing on the first run:**
 
@@ -3012,6 +3237,101 @@ Then open GitLab → **Build → Pipelines**. Click the running pipeline and wat
 | `deploy_application` | 4–8 min (waiting for SSM to come online is the slow part) |
 
 The **first** run is the slowest. Later runs are much faster.
+
+> If you added **Required reviewers** to the `production` environment, the run stops before `terraform_apply` and shows a yellow **Review deployments** button. Click it → tick `production` → **Approve and deploy**.
+
+---
+
+### 6.6 Where things moved — GitLab wording vs GitHub wording
+
+The course material (and most tutorials) use GitLab words. Use this table when you read them, and in your report if your teacher asks why you used GitHub.
+
+| GitLab CI | GitHub Actions | In this project |
+|---|---|---|
+| `.gitlab-ci.yml` | any file in `.github/workflows/` | `ci-cd.yml`, `destroy.yml` |
+| stage | job (ordered with `needs:`) | `build_and_test` → `terraform_apply` → `deploy_application` |
+| job | job + steps | each job has named steps |
+| runner / shared runner | GitHub-hosted runner | `runs-on: ubuntu-latest` |
+| `image:` + `services: docker:dind` | not needed | Docker is pre-installed on the runner |
+| CI/CD variable (masked) | **environment secret** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+| CI/CD variable (plain) | repository **variable** | `AWS_REGION`, `TF_STATE_BUCKET` |
+| protected variable + protected branch | **environment** with a branch rule | environment `production`, branch `main` |
+| `rules: if:` | `if:` on the job or step | `if: github.ref == 'refs/heads/main'` |
+| `artifacts:` / `needs: artifacts` | `upload-artifact` / `download-artifact` | the saved Docker image, `tf_output.json` |
+| `when: manual` | `workflow_dispatch` | the destroy button |
+| `after_script` | a step with `if: always()` | the Docker cleanup steps |
+| `interruptible: true` | `concurrency: cancel-in-progress` | cancels the old run on a new push |
+| `$CI_COMMIT_SHORT_SHA` | `${{ github.sha }}` (cut to 8) | the image tag |
+| `$CI_COMMIT_REF_NAME` | `${{ github.ref_name }}` | branch name |
+| `$CI_PIPELINE_ID` | `${{ github.run_id }}` | written into the SSM comment |
+| Build → Pipelines | the **Actions** tab | where you watch the run |
+
+---
+
+### 6.7 Optional upgrade — no long-lived keys at all (OIDC)
+
+You can finish the project with the access keys above; everything works. But the strongest possible answer to "secure credentials management" is to have **no keys at all**. GitHub can prove its identity to AWS directly, and AWS hands out temporary credentials that live for one hour.
+
+**Step 1 — tell AWS to trust GitHub (once, as `nika-admin`):**
+
+```powershell
+aws iam create-open-id-connect-provider `
+  --url https://token.actions.githubusercontent.com `
+  --client-id-list sts.amazonaws.com
+```
+
+**Step 2 — create a role GitHub may assume.** Save this as `trust.json`, replacing the account id and the repository:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+      },
+      "StringLike": {
+        "token.actions.githubusercontent.com:sub": "repo:nikachkharti/SCAA-FinalProject:*"
+      }
+    }
+  }]
+}
+```
+
+```powershell
+aws iam create-role --role-name github-actions-scaa `
+  --assume-role-policy-document file://trust.json
+
+# Re-use the very same least-privilege policy document from section 4.3
+aws iam put-role-policy --role-name github-actions-scaa `
+  --policy-name scaa-final-ci-policy `
+  --policy-document file://ci-policy.json
+```
+
+**Step 3 — change the workflows.** Add the `id-token` permission and swap the credentials step:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write # required for OIDC
+```
+
+```yaml
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions-scaa
+          aws-region: ${{ vars.AWS_REGION }}
+```
+
+Then delete both AWS secrets from GitHub and delete the access key of `github-ci-scaa` in IAM. The `sub` condition means only workflows from *your* repository can assume that role.
+
+> **Do this only after the normal pipeline works end to end.** Get a green run with the keys first, take your screenshots, then upgrade if you have time. Mention it either way — "I used static keys but the production-grade option is OIDC federation" is a good sentence for the report, and it is already listed under *Known limitations* in the README.
 
 ---
 
@@ -3085,10 +3405,10 @@ Make a small visible change (for example, edit the heading in `SCAA-Final/SCAA-F
 ```powershell
 git add .
 git commit -m "Change home page heading"
-git push gitlab main
+git push origin main
 ```
 
-Watch the pipeline run again. When it finishes, refresh the browser — the new text is there, and `/version` shows the new commit SHA. This is your proof that the automation really works. **Record a short screen video if you can.**
+Watch the pipeline run again in the **Actions** tab. When it finishes, refresh the browser — the new text is there, and `/version` shows the new commit SHA. This is your proof that the automation really works. **Record a short screen video if you can.**
 
 ---
 
@@ -3098,25 +3418,28 @@ Watch the pipeline run again. When it finishes, refresh the browser — the new 
 
 ### Option A — the manual button (recommended)
 
-1. GitLab → **Build → Pipelines** → open the latest successful pipeline.
-2. In the **destroy** stage, find `terraform_destroy_manual`.
-3. Click the ▶ **play** button.
+1. GitHub → the **Actions** tab → in the list on the left click **Destroy Infrastructure**.
+2. Click the **Run workflow** button on the right.
+3. Leave the branch as `main`, type `DESTROY` (capital letters) in the confirmation box, then click the green **Run workflow**.
 4. Wait 2–3 minutes. The log ends with `Destroy complete! Resources: N destroyed.`
+
+> **No "Run workflow" button?** `destroy.yml` is not on the `main` branch yet — push it first.
+> **The run starts and is immediately skipped?** You typed something other than `DESTROY`.
 
 ### Option B — the destroy branch
 
 ```powershell
 git checkout -b destroy
-git push gitlab destroy
+git push origin destroy
 ```
 
-The `terraform_destroy_on_branch` job runs automatically.
+The **Destroy Infrastructure** workflow starts by itself, because it also triggers on a push to that branch.
 
 To use it again later:
 
 ```powershell
 git checkout main
-git push gitlab --delete destroy   # remove the remote branch
+git push origin --delete destroy   # remove the remote branch
 git branch -D destroy              # remove the local branch
 ```
 
@@ -3154,27 +3477,27 @@ Documentation is a graded item. Replace `README.md` in the repository root with 
 # SCAA DevOps Final Project — Containerised Web Application on AWS
 
 An ASP.NET Core 10 MVC application, packaged with Docker, deployed to AWS EC2
-through a fully automated GitLab CI/CD pipeline, with infrastructure managed by
-Terraform and monitoring in Amazon CloudWatch.
+through a fully automated GitHub Actions CI/CD pipeline, with infrastructure
+managed by Terraform and monitoring in Amazon CloudWatch.
 
 **Author:** Nikoloz Chkhartishvili
 **Course:** SCAA DevOps
-**Repository:** <your GitLab URL>
+**Repository:** <your GitHub URL>
 
 ---
 
 ## 1. Architecture
 
 ```
-Developer  ->  GitLab  ->  Pipeline  ->  AWS
+Developer  ->  GitHub  ->  Actions  ->  AWS
                               |
       +-----------------------+-----------------------+
-      |            |              |                   |
-  build_test  terraform_apply   deploy          destroy (manual)
-      |            |              |
-   Docker      ECR / EC2 /    ECR push +
-   image +     IAM / SG /     SSM run
-   /health     CloudWatch
+      |              |              |                 |
+build_and_test  terraform_apply  deploy_application  destroy
+      |              |              |              (manual or
+   Docker        ECR / EC2 /    ECR push +       "destroy" branch)
+   image +       IAM / SG /     SSM run
+   /health       CloudWatch
 ```
 
 | Layer | Technology |
@@ -3184,7 +3507,7 @@ Developer  ->  GitLab  ->  Pipeline  ->  AWS
 | Registry | Amazon ECR (private, scan on push, 5-image lifecycle policy) |
 | Compute | Amazon EC2 `t3.micro`, Amazon Linux 2023, Elastic IP |
 | IaC | Terraform 1.13, 5 modules, remote state in S3 with locking |
-| CI/CD | GitLab CI, 4 stages |
+| CI/CD | GitHub Actions — 2 workflows, 4 jobs |
 | Monitoring | CloudWatch Logs (7-day retention), Metrics, 2 Alarms, 1 Dashboard |
 | Remote access | AWS SSM Session Manager — **no SSH, no open port 22** |
 
@@ -3194,7 +3517,10 @@ Developer  ->  GitLab  ->  Pipeline  ->  AWS
 
 ```
 .
-├── .gitlab-ci.yml                     # CI/CD pipeline
+├── .github/
+│   └── workflows/
+│       ├── ci-cd.yml                  # build & test -> terraform apply -> deploy
+│       └── destroy.yml                # terraform destroy (button or "destroy" branch)
 ├── README.md
 ├── SCAA-Final/
 │   ├── docker-compose.yml             # local development only
@@ -3285,42 +3611,46 @@ aws s3api put-public-access-block --bucket $BUCKET \
   --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 
-aws iam create-user --user-name gitlab-ci-scaa
-aws iam put-user-policy --user-name gitlab-ci-scaa \
+aws iam create-user --user-name github-ci-scaa
+aws iam put-user-policy --user-name github-ci-scaa \
   --policy-name scaa-final-ci-policy --policy-document file://ci-policy.json
-aws iam create-access-key --user-name gitlab-ci-scaa
+aws iam create-access-key --user-name github-ci-scaa
 ```
 
-### GitLab CI/CD variables
+### GitHub Actions secrets and variables
 
-**Settings → CI/CD → Variables**
+**Settings → Secrets and variables → Actions**
 
-| Key | Masked | Protected |
+| Name | Kind | Where |
 |---|---|---|
-| `AWS_ACCESS_KEY_ID` | yes | yes |
-| `AWS_SECRET_ACCESS_KEY` | yes | yes |
-| `AWS_DEFAULT_REGION` | no | yes |
-| `TF_STATE_BUCKET` | no | yes |
+| `AWS_ACCESS_KEY_ID` | Secret | environment `production` |
+| `AWS_SECRET_ACCESS_KEY` | Secret | environment `production` |
+| `AWS_REGION` | Variable | repository (`eu-central-1`) |
+| `TF_STATE_BUCKET` | Variable | repository (S3 state bucket name) |
 
-No credential is stored in this repository.
+The two secrets belong to the `production` environment, so only the jobs that
+declare `environment: production` receive them, and that environment accepts
+only the `main` and `destroy` branches. No credential is stored in this
+repository.
 
 ---
 
 ## 6. Pipeline
 
-| Stage | Job | Trigger | What it does |
+| Workflow | Job | Trigger | What it does |
 |---|---|---|---|
-| `build_test` | `build_and_test` | every push (except `destroy`) | Builds the image, verifies labels, verifies non-root, starts the container, smoke-tests `/health`, `/`, `/version`, saves the image as an artifact, prunes local images. |
-| `terraform_apply` | `terraform_apply` | `main` | `fmt -check`, `validate`, `plan`, `apply`. Creates ECR, IAM, SG, EC2, EIP, log groups, alarms, dashboard. Exports outputs as an artifact. |
-| `deploy` | `deploy_application` | `main` | Loads the artifact image, pushes to ECR (`:sha` and `:latest`), waits for SSM, runs `/usr/local/bin/deploy-app.sh` on EC2, verifies the public `/health`. |
-| `destroy` | `terraform_destroy_manual` | `main`, manual button | `terraform destroy`. |
-| `destroy` | `terraform_destroy_on_branch` | push to branch `destroy` | `terraform destroy`. |
+| `ci-cd.yml` | `build_and_test` | every push and pull request to `main` | Builds the image, verifies labels, verifies non-root, starts the container, smoke-tests `/health`, `/`, `/version`, uploads the image as an artifact, prunes local images. |
+| `ci-cd.yml` | `terraform_apply` | `main` only | `fmt -check`, `validate`, `plan`, `apply`. Creates ECR, IAM, SG, EC2, EIP, log groups, alarms, dashboard. Passes the outputs to the next job. |
+| `ci-cd.yml` | `deploy_application` | `main` only | Downloads the artifact image, pushes to ECR (`:sha` and `:latest`), waits for SSM, runs `/usr/local/bin/deploy-app.sh` on EC2, verifies the public `/health`. |
+| `destroy.yml` | `terraform_destroy` | manual **Run workflow** button | `terraform destroy`. |
+| `destroy.yml` | `terraform_destroy` | push to branch `destroy` | `terraform destroy`. |
 
 **Fail fast:** every job uses `set -euo pipefail` and exits non-zero on any
-failed check, so GitLab stops the pipeline immediately.
+failed check, so GitHub Actions stops the run and skips every dependent job
+immediately.
 
-**Cleanup:** both Docker jobs run `docker image prune -af` in `after_script`,
-which executes even when the job fails.
+**Cleanup:** both Docker jobs run `docker image prune -af` in a step marked
+`if: always()`, which executes even when the job fails.
 
 ---
 
@@ -3378,7 +3708,7 @@ CloudWatch:
 
 ## 9. Destroying the infrastructure
 
-* **Manual:** latest pipeline on `main` → stage `destroy` → play `terraform_destroy_manual`.
+* **Manual:** Actions tab → **Destroy Infrastructure** → **Run workflow** → type `DESTROY`.
 * **Branch trigger:** `git push origin HEAD:destroy`.
 
 Verify:
@@ -3405,7 +3735,7 @@ aws ec2 describe-addresses --query "Addresses[].PublicIp"
 | `no-new-privileges` | Blocks privilege escalation inside the container |
 | IMDSv2 required (`http_tokens = "required"`) | Protects instance credentials from SSRF attacks |
 | Encrypted EBS volume and ECR repository | Data protected at rest |
-| Protected + masked GitLab variables | Credentials never printed, never given to unprotected branches |
+| GitHub environment secrets on `production` | Credentials never printed, never given to pull requests, and never to a job that does not declare the environment |
 | Scoped IAM policies | The CI user and the instance role can only touch this project's resources |
 | Egress limited to 80/443 | Reduces what a compromised host can reach |
 
@@ -3418,7 +3748,8 @@ aws ec2 describe-addresses --query "Addresses[].PublicIp"
 * Single EC2 instance in the default VPC; no auto-scaling and no high availability.
 * Deployment is "stop then start", so there are a few seconds of downtime.
   Blue/green or ECS rolling updates would remove that.
-* Static IAM user keys. GitLab-to-AWS OIDC federation would remove long-lived keys.
+* Static IAM user keys. GitHub-to-AWS OIDC federation (`id-token: write` plus an
+  IAM role) would remove long-lived keys completely — see section 6.7 of the guide.
 ````
 
 ---
@@ -3453,13 +3784,13 @@ Go through this before you submit. Each line is something the task grades.
 
 ### CI/CD
 
-- [x] Four stages, exactly as the task describes
+- [x] Four stages, exactly as the task describes (three jobs in `ci-cd.yml`, plus the `destroy.yml` workflow)
 - [x] `set -euo pipefail` everywhere — fail fast
 - [x] Every check ends with an explicit `exit 1` on failure
-- [x] Credentials as masked + protected GitLab variables, never in Git
+- [x] Credentials as GitHub **environment** secrets on `production`, limited to the `main` / `destroy` branches, never in Git
 - [x] Clear section headers and attempt counters in the logs
 - [x] Remote stdout and stderr printed back into the job log
-- [x] `docker image prune -af` in `after_script` — cleanup even on failure
+- [x] `docker image prune -af` in an `if: always()` step — cleanup even on failure
 - [x] Image built once and reused as an artifact — no duplicate builds
 - [x] Destroy available both as a manual button and as a branch trigger
 
@@ -3500,22 +3831,38 @@ Run `terraform fmt -recursive` inside `terraform/` on your laptop, commit, push.
 
 **`Error: Failed to get existing workspaces: S3 bucket does not exist`**
 The `TF_STATE_BUCKET` variable is wrong, or the bucket is in another region.
-Check with `aws s3 ls` and compare with the GitLab variable.
+Check with `aws s3 ls` and compare with the repository variable
+(Settings → Secrets and variables → Actions → Variables).
 
 **`AccessDenied` or `UnauthorizedOperation` during apply**
 The CI IAM user is missing a permission. Read the error — it names the exact
 action, for example `ec2:AllocateAddress`. Add it to `ci-policy.json` and run
 `aws iam put-user-policy` again.
 
-**Variables are empty in the job (`TF_STATE_BUCKET` is blank)**
-The variables are **Protected** but the branch is not protected.
-Either protect the branch (Settings → Repository → Protected branches) or
-uncheck "Protect variable".
+**Variables or secrets are empty in the job (`TF_STATE_BUCKET` is blank)**
+Four usual causes:
+1. The secrets are **environment** secrets of `production` (section 6.2) but the
+   job is missing the `environment: production` line. Without it GitHub does not
+   hand them over, and `aws sts get-caller-identity` fails with
+   "Unable to locate credentials".
+2. You created a **variable** but read it as `${{ secrets.X }}`, or a secret read
+   as `${{ vars.X }}`. The two stores are separate.
+3. You typed the name with a different spelling. Names are case-sensitive.
+4. The run came from a **fork's pull request**. GitHub never gives secrets to
+   those. Push to a branch in your own repository instead.
 
-**`curl: (7) Failed to connect to docker port 8080` in the smoke test**
-With Docker-in-Docker, published ports live on the `docker` service host, not
-on `localhost`. The URL must be `http://docker:8080/health`, not
-`http://localhost:8080/health`.
+**`Branch "destroy" is not allowed to deploy to production`**
+The `production` environment only lists `main`. Add a second deployment branch
+rule for `destroy` (section 6.2, step 1), or run the destroy workflow from the
+Actions tab instead.
+
+**`curl: (7) Failed to connect to localhost port 8080` in the smoke test**
+On a GitHub-hosted runner Docker runs directly on the machine, so a published
+port really is on `localhost`. If the connection is refused, the container died
+at start-up: read the `Application logs from the smoke test` step, or add
+`docker ps -a` before the curl loop. (Tutorials written for GitLab use
+`http://docker:8080` because of Docker-in-Docker — that host name does not
+exist here.)
 
 **The `deploy` job says "the instance never appeared in SSM"**
 The instance needs 2–4 minutes to install the SSM agent and register.
@@ -3525,8 +3872,10 @@ role is missing `AmazonSSMManagedInstanceCore`. Check the
 `/scaa-final-dev/system` log group, stream `<instance-id>/user-data`.
 
 **`docker load` fails or the artifact is missing**
-The `build_and_test` job must finish successfully and the `deploy_application`
-job must list it under `needs:` with `artifacts: true`.
+The `build_and_test` job must finish successfully, `deploy_application` must
+list it under `needs:`, and the artifact name in `download-artifact` must match
+the one in `upload-artifact` exactly — both are built from the image tag, so
+they only differ if you edited one of them.
 
 ### Application problems
 
@@ -3580,20 +3929,20 @@ This is caused by the AMI id changing. The `lifecycle { ignore_changes = [ami] }
 block prevents it. Make sure you copied it.
 
 **`Error: creating EC2 Instance: InvalidAMIID.NotFound`**
-The region in `terraform.tfvars` does not match `AWS_DEFAULT_REGION` in GitLab.
+The region in `terraform.tfvars` does not match the `AWS_REGION` repository
+variable in GitHub.
 
 ### Other small problems
 
-**`apk add aws-cli` fails or is very slow in the job**
-The Alpine community repository sometimes lags. Replace that one line in the
-`.docker_job` `before_script` with the official installer:
+**`aws: command not found` or `jq: command not found` in a job**
+GitHub-hosted `ubuntu-latest` runners already include Docker, the AWS CLI v2,
+`jq`, `curl` and `git`, so this should not happen. If you changed `runs-on` to a
+container image or a self-hosted runner, install them yourself, for example:
 
 ```yaml
-- apk add --no-cache curl jq bash python3 py3-pip > /dev/null
-- pip install --break-system-packages --quiet awscli
+      - name: Install the tools
+        run: sudo apt-get update && sudo apt-get install -y jq awscli
 ```
-
-Or use `amazon/aws-cli:2` as the job image and install the Docker CLI instead.
 
 **The app logs a warning about Data Protection keys**
 You will see something like
@@ -3607,15 +3956,25 @@ by adding one line to the `docker run` command in `user_data.sh.tftpl`:
   --tmpfs /home/app/.aspnet:rw,size=16m \
 ```
 
-**GitLab says "This job is stuck because you don't have any active runners"**
-On gitlab.com you must verify your account (add a credit card — you are not
-charged) before shared runners are enabled. Go to
-**Settings → CI/CD → Runners** and check that shared runners are turned on.
+**Nothing happens after `git push` — no run appears in the Actions tab**
+1. The workflow file must be at `.github/workflows/<name>.yml` (note the dot and
+   the plural `workflows`), and it must be committed and pushed.
+2. Check **Settings → Actions → General → Actions permissions** is set to
+   *Allow all actions*.
+3. `ci-cd.yml` ignores pushes that only change `**.md` files — commit a real
+   change, or run it by hand from the Actions tab (`workflow_dispatch`).
+4. A red ❌ next to the file name in the Actions tab means invalid YAML.
+   Open the file on GitHub; it shows the exact line.
 
-**The pipeline uses all your free CI minutes**
-gitlab.com gives 400 free minutes per month on the free plan. This pipeline
-uses roughly 10–15 minutes per full run. Do not push 50 times in one day. Test
-Docker builds locally first.
+**The run stops with a yellow "Review deployments" button**
+You added *Required reviewers* to the `production` environment. Click the
+button, tick `production`, then **Approve and deploy**. Remove the reviewer rule
+if you do not want to approve every run.
+
+**The pipeline uses all your free Actions minutes**
+A private repository on the free plan gets 2,000 minutes per month; a public
+repository is unlimited. This pipeline uses roughly 10–15 minutes per full run.
+Test Docker builds locally first, and let `concurrency` cancel superseded runs.
 
 ### Getting a shell on the instance (for debugging)
 
@@ -3647,7 +4006,8 @@ curl -i http://localhost/health
 ### Files that must exist in the repository
 
 ```
-.gitlab-ci.yml
+.github/workflows/ci-cd.yml
+.github/workflows/destroy.yml
 README.md
 .gitignore                       (with Terraform rules added)
 SCAA-Final/docker-compose.yml
@@ -3688,7 +4048,7 @@ That last command must print nothing.
 
 ### Screenshots to collect for the report
 
-1. GitLab pipeline — all four stages, green
+1. GitHub Actions — the whole run, all jobs green (Actions tab)
 2. `build_and_test` log — the metadata check and the passing health check
 3. `terraform_apply` log — the "Apply complete!" line with the outputs
 4. `deploy_application` log — the "DEPLOYMENT SUCCESSFUL" banner
@@ -3702,7 +4062,7 @@ That last command must print nothing.
 12. CloudWatch — application log stream with real ASP.NET log lines
 13. CloudWatch — the dashboard with all four widgets
 14. CloudWatch — the two alarms in `OK` state
-15. GitLab — the destroy job finishing, plus empty AWS resource lists
+15. GitHub Actions — the **Destroy Infrastructure** run finishing, plus the empty AWS resource lists
 
 ### Suggested order of work
 
@@ -3711,7 +4071,7 @@ That last command must print nothing.
 | 1 | Section 3 — fix `Program.cs`, Dockerfile, `.gitignore`. Test locally. |
 | 2 | Section 4 — AWS bootstrap: bucket, IAM user, keys. |
 | 3 | Section 5 — write all Terraform files. `terraform validate` must pass. |
-| 4 | Section 6 — GitLab project, variables, `.gitlab-ci.yml`. First pipeline run and fixes. |
+| 4 | Section 6 — GitHub secrets and variables, `production` environment, the two workflow files. First pipeline run and fixes. |
 | 5 | Section 7 — verify everything, collect screenshots. |
 | 6 | Section 9 — write the README. Section 8 — destroy. |
 
