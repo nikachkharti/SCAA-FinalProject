@@ -427,3 +427,27 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# ---- Terraform ----
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+tfplan
+*.tfplan
+
+# Never commit variable values that may contain secrets
+*.auto.tfvars
+secrets.tfvars
+
+# ---- CI helper files ----
+tf_output.json
+image/
