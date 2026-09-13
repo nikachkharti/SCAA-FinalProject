@@ -2004,7 +2004,7 @@ This is the script that runs **once**, automatically, the first time the server 
 #!/bin/bash
 # ---------------------------------------------------------------------------
 # EC2 bootstrap script (runs once, as root, on first boot).
-# Rendered by Terraform: ${...} placeholders are replaced before upload.
+# Rendered by Terraform: $${...} placeholders are replaced before upload.
 # ---------------------------------------------------------------------------
 set -euxo pipefail
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
