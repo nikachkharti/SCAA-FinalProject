@@ -1,14 +1,14 @@
 name: Destroy Infrastructure
 
-on:
-  workflow_dispatch:
-    inputs:
-      confirm:
-        description: 'Type DESTROY (capital letters) to confirm'
-        required: true
-        default: ''
-  push:
-    branches: [destroy]
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       confirm:
+#         description: 'Type DESTROY (capital letters) to confirm'
+#         required: true
+#         default: ''
+#   push:
+#     branches: [destroy]
 
 concurrency:
   group: scaa-final-destroy # never run two destroys at the same time
