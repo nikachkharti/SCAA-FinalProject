@@ -1,0 +1,86 @@
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DESTROY (capital letters) to confirm'
+        required: true
+        default: ''
+  push:
+    branches: [destroy]
+
+concurrency:
+  group: scaa-final-destroy # never run two destroys at the same time
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "1.13.3"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  terraform_destroy:
+    name: Destroy all AWS resources
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    # Manual runs must be confirmed; a push to the destroy branch always runs.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.inputs.confirm == 'DESTROY'
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: Terraform destroy
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          echo "===== DESTROYING ALL INFRASTRUCTURE ====="
+          terraform plan -destroy -input=false -var="image_tag=latest" -out=destroy.tfplan
+          terraform apply -input=false -auto-approve destroy.tfplan
+          echo "All AWS resources for this project have been deleted."
+
+      - name: Write the run summary
+        if: always()
+        run: |
+          {
+            echo "## Destroy finished"
+            echo ""
+            echo "Triggered by: \`${{ github.event_name }}\`"
+            echo ""
+            echo "Remember: the S3 state bucket and the CI IAM user are NOT deleted -"
+            echo "they are the bootstrap, not project resources."
+          } >> "$GITHUB_STEP_SUMMARY"
