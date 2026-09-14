@@ -15,7 +15,6 @@ namespace SCAA_Final_Web
                 options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
             });
 
-
             var app = builder.Build();
 
             if (!app.Environment.IsDevelopment())
